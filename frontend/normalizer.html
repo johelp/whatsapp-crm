@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Normalizador de Números — WA CRM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/app.css">
+<style>
+  body { background: var(--bg); min-height: 100vh; padding: 24px; }
+
+  .page-wrap { max-width: 960px; margin: 0 auto; }
+
+  .page-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 24px;
+  }
+
+  .page-header h1 { font-size: 20px; font-weight: 600; }
+  .page-header p { font-size: 13px; color: var(--text3); margin-top: 2px; }
+
+  .back-btn {
+    font-size: 12px; color: var(--text3); text-decoration: none;
+    display: flex; align-items: center; gap: 5px;
+    padding: 6px 12px; border: 1px solid var(--border);
+    border-radius: var(--radius); background: var(--surface);
+    transition: all 0.15s;
+  }
+  .back-btn:hover { color: var(--text); border-color: var(--border2); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 20px; margin-bottom: 16px; }
+
+  .card h3 { font-size: 13px; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 7px; }
+
+  .country-row { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 16px; flex-wrap: wrap; }
+
+  .country-select { padding: 8px 12px; border: 1.5px solid var(--border); border-radius: var(--radius); font-family: 'Sora',sans-serif; font-size: 13px; color: var(--text); background: var(--surface2); outline: none; cursor: pointer; }
+  .country-select:focus { border-color: var(--wa); }
+
+  .tab-row { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab-btn { padding: 7px 16px; border: 1.5px solid var(--border); border-radius: var(--radius); font-size: 12px; font-weight: 500; font-family: 'Sora',sans-serif; cursor: pointer; background: transparent; color: var(--text3); transition: all 0.15s; }
+  .tab-btn.active { background: var(--wa-light); border-color: var(--wa-mid); color: var(--wa); }
+
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  textarea.input { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; }
+
+  .hint { font-size: 11px; color: var(--text3); margin-top: 6px; font-family: 'JetBrains Mono', monospace; }
+
+  /* Results */
+  .summary-bar {
+    display: flex; gap: 16px; padding: 12px 16px;
+    background: var(--surface2); border-radius: var(--radius);
+    margin-bottom: 14px; flex-wrap: wrap;
+  }
+
+  .sum-stat { font-size: 13px; }
+  .sum-stat b { font-weight: 600; }
+  .sum-stat.valid b { color: var(--wa); }
+  .sum-stat.invalid b { color: var(--red); }
+
+  .results-toolbar {
+    display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap;
+  }
+
+  .filter-toggle { display: flex; gap: 4px; }
+
+  .results-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .results-table thead th {
+    padding: 7px 10px; text-align: left; font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.5px; color: var(--text3);
+    border-bottom: 1.5px solid var(--border); background: var(--bg);
+    position: sticky; top: 0;
+  }
+  .results-table tbody tr { border-bottom: 1px solid var(--border); }
+  .results-table tbody tr:hover { background: var(--surface2); }
+  .results-table tbody td { padding: 8px 10px; vertical-align: middle; }
+
+  .badge-valid { background: var(--wa-light); color: var(--wa); padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .badge-invalid { background: var(--red-light); color: var(--red); padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+
+  .num-normalized { font-family: 'JetBrains Mono', monospace; font-weight: 500; color: var(--text); }
+  .num-original { font-family: 'JetBrains Mono', monospace; color: var(--text3); font-size: 11px; }
+
+  .flag { font-size: 16px; }
+
+  .table-wrap { max-height: 400px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+
+  .action-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .spinner-inline { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--wa); border-radius: 50%; animation: spin 0.7s linear infinite; vertical-align: middle; margin-right: 4px; }
+</style>
+</head>
+<body>
+
+<div class="page-wrap">
+
+  <div class="page-header">
+    <div>
+      <h1>📱 Normalizador de Números</h1>
+      <p>Convierte cualquier formato al estándar internacional de WhatsApp</p>
+    </div>
+    <a href="/" class="back-btn">← Volver al CRM</a>
+  </div>
+
+  <!-- Config -->
+  <div class="card">
+    <h3>⚙️ Configuración</h3>
+    <div class="country-row">
+      <div class="field">
+        <label>País por defecto <span style="font-weight:300;color:var(--text3)">(para números sin código de país)</span></label>
+        <select class="country-select" id="default-country">
+          <option value="ES">🇪🇸 España (+34)</option>
+          <option value="AR">🇦🇷 Argentina (+54)</option>
+          <option value="MX">🇲🇽 México (+52)</option>
+          <option value="CO">🇨🇴 Colombia (+57)</option>
+          <option value="CL">🇨🇱 Chile (+56)</option>
+          <option value="PE">🇵🇪 Perú (+51)</option>
+          <option value="VE">🇻🇪 Venezuela (+58)</option>
+          <option value="EC">🇪🇨 Ecuador (+593)</option>
+          <option value="UY">🇺🇾 Uruguay (+598)</option>
+          <option value="PY">🇵🇾 Paraguay (+595)</option>
+          <option value="BO">🇧🇴 Bolivia (+591)</option>
+          <option value="US">🇺🇸 Estados Unidos (+1)</option>
+          <option value="GB">🇬🇧 Reino Unido (+44)</option>
+          <option value="DE">🇩🇪 Alemania (+49)</option>
+          <option value="FR">🇫🇷 Francia (+33)</option>
+          <option value="IT">🇮🇹 Italia (+39)</option>
+          <option value="BR">🇧🇷 Brasil (+55)</option>
+        </select>
+      </div>
+      <div style="font-size:12px;color:var(--text3);max-width:360px;line-height:1.6">
+        Los números que ya tienen código de país (<code style="background:var(--surface3);padding:1px 5px;border-radius:4px">+34...</code>, <code style="background:var(--surface3);padding:1px 5px;border-radius:4px">0034...</code>) se detectan automáticamente. Este ajuste aplica solo a los números locales sin prefijo.
+      </div>
+    </div>
+  </div>
+
+  <!-- Input -->
+  <div class="card">
+    <h3>📋 Ingresar números</h3>
+
+    <div class="tab-row">
+      <button class="tab-btn active" onclick="switchTab('manual',this)">✏️ Pegar lista</button>
+      <button class="tab-btn" onclick="switchTab('csv',this)">📎 Importar CSV</button>
+    </div>
+
+    <!-- Manual -->
+    <div class="tab-content active" id="tab-manual">
+      <div class="field">
+        <label>Números (uno por línea, o con coma: número,nombre,extra)</label>
+        <textarea class="input" id="manual-input" rows="10"
+          placeholder="+34612345678
+0034612345678
+612345678
+5491123456789,Juan García,VIP
++525512345678,María López
+3001234567,Carlos"></textarea>
+        <p class="hint">Formatos soportados: +34..., 0034..., 34..., números locales. Con nombre: número,nombre,extra</p>
+      </div>
+      <div style="margin-top:12px">
+        <button class="btn-primary" onclick="normalizeManual()">🔍 Normalizar</button>
+      </div>
+    </div>
+
+    <!-- CSV -->
+    <div class="tab-content" id="tab-csv">
+      <div class="field">
+        <label>Archivo CSV</label>
+        <div style="border: 2px dashed var(--border2); border-radius: var(--radius); padding: 32px; text-align: center; cursor: pointer; transition: all 0.15s;"
+             id="drop-zone"
+             onclick="document.getElementById('csv-file').click()"
+             ondragover="event.preventDefault();this.style.borderColor='var(--wa)'"
+             ondragleave="this.style.borderColor='var(--border2)'"
+             ondrop="handleDrop(event)">
+          <div style="font-size:32px;margin-bottom:8px">📎</div>
+          <p style="font-size:13px;font-weight:500">Arrastrá el CSV acá o hacé clic</p>
+          <p style="font-size:12px;color:var(--text3);margin-top:4px" id="csv-filename">Ningún archivo seleccionado</p>
+        </div>
+        <input type="file" id="csv-file" accept=".csv,.txt" style="display:none" onchange="handleCSVFile(event)">
+      </div>
+      <div class="hint" style="margin-top:8px">
+        Columnas detectadas automáticamente: <code>phone</code>, <code>telefono</code>, <code>numero</code>, <code>tel</code>, <code>mobile</code>, <code>celular</code>, <code>whatsapp</code>.
+        Si no hay columna conocida, usa la primera columna.
+      </div>
+      <div style="margin-top:14px">
+        <button class="btn-primary" onclick="normalizeCSV()" id="btn-csv">📎 Normalizar CSV</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Results -->
+  <div class="card" id="results-card" style="display:none">
+    <h3>✅ Resultados</h3>
+
+    <div class="summary-bar" id="summary-bar"></div>
+
+    <div class="results-toolbar">
+      <div class="filter-toggle">
+        <button class="filter-btn active" onclick="setFilter('all',this)">Todos</button>
+        <button class="filter-btn" onclick="setFilter('valid',this)">✅ Válidos</button>
+        <button class="filter-btn" onclick="setFilter('invalid',this)">❌ Inválidos</button>
+      </div>
+      <div style="flex:1"></div>
+      <div class="action-buttons">
+        <button class="btn-secondary" onclick="exportCSV(false)">⬇ Exportar todos</button>
+        <button class="btn-primary" onclick="exportCSV(true)">⬇ Exportar válidos</button>
+        <button class="btn-secondary" onclick="copyToClipboard()">📋 Copiar números</button>
+        <button class="btn-secondary" onclick="importToCRM()">➕ Importar al CRM</button>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="results-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Estado</th>
+            <th>País</th>
+            <th>Número normalizado</th>
+            <th>Original</th>
+            <th>Nombre</th>
+          </tr>
+        </thead>
+        <tbody id="results-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div>
+
+<!-- Notification -->
+<div id="notifications"></div>
+
+<script>
+const API = '/api';
+let allResults = [];
+let currentFilter = 'all';
+let selectedCSVFile = null;
+
+// ─── Tabs ─────────────────────────────────────────────────────────────────────
+
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById(`tab-${name}`).classList.add('active');
+  btn.classList.add('active');
+}
+
+// ─── CSV file handling ────────────────────────────────────────────────────────
+
+function handleCSVFile(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  selectedCSVFile = file;
+  document.getElementById('csv-filename').textContent = `${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+  document.getElementById('drop-zone').style.borderColor = 'var(--wa)';
+}
+
+function handleDrop(event) {
+  event.preventDefault();
+  event.currentTarget.style.borderColor = 'var(--border2)';
+  const file = event.dataTransfer.files[0];
+  if (!file) return;
+  selectedCSVFile = file;
+  document.getElementById('csv-filename').textContent = `${file.name} (${(file.size/1024).toFixed(1)} KB)`;
+  event.currentTarget.style.borderColor = 'var(--wa)';
+}
+
+// ─── Normalize manual ─────────────────────────────────────────────────────────
+
+async function normalizeManual() {
+  const raw = document.getElementById('manual-input').value.trim();
+  if (!raw) { notify('Ingresá al menos un número', 'warning'); return; }
+
+  const numbers = raw.split('\n').filter(l => l.trim()).map(line => {
+    const parts = line.split(',').map(s => s.trim());
+    return { phone: parts[0] || '', name: parts[1] || '', extra: parts[2] || '' };
+  });
+
+  const res = await apiFetch('/normalize/list', {
+    method: 'POST',
+    body: JSON.stringify({ numbers, defaultCountry: getCountry() }),
+  });
+
+  if (res?.results) showResults(res);
+  else notify(res?.error || 'Error al normalizar', 'error');
+}
+
+// ─── Normalize CSV ────────────────────────────────────────────────────────────
+
+async function normalizeCSV() {
+  if (!selectedCSVFile) { notify('Seleccioná un archivo CSV', 'warning'); return; }
+
+  const btn = document.getElementById('btn-csv');
+  btn.innerHTML = '<span class="spinner-inline"></span> Procesando...';
+  btn.disabled = true;
+
+  const formData = new FormData();
+  formData.append('file', selectedCSVFile);
+  formData.append('defaultCountry', getCountry());
+
+  try {
+    const res = await fetch(`${API}/normalize/csv`, {
+      method: 'POST',
+      body: formData,
+      credentials: 'include',
+    });
+    const data = await res.json();
+    if (data?.results) showResults(data);
+    else notify(data?.error || 'Error al procesar CSV', 'error');
+  } catch(e) {
+    notify('Error: ' + e.message, 'error');
+  } finally {
+    btn.innerHTML = '📎 Normalizar CSV';
+    btn.disabled = false;
+  }
+}
+
+// ─── Show results ─────────────────────────────────────────────────────────────
+
+function showResults(data) {
+  allResults = data.results;
+  const s = data.summary;
+
+  document.getElementById('results-card').style.display = 'block';
+  document.getElementById('results-card').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  document.getElementById('summary-bar').innerHTML = `
+    <span class="sum-stat">Total: <b>${s.total}</b></span>
+    <span class="sum-stat valid">Válidos: <b>${s.valid}</b></span>
+    <span class="sum-stat invalid">Inválidos: <b>${s.invalid}</b></span>
+    <span class="sum-stat" style="color:var(--text3)">Tasa de éxito: <b>${Math.round((s.valid/s.total)*100)}%</b></span>
+  `;
+
+  renderTable();
+}
+
+const countryFlags = {
+  ES:'🇪🇸', AR:'🇦🇷', MX:'🇲🇽', CO:'🇨🇴', CL:'🇨🇱', PE:'🇵🇪', VE:'🇻🇪',
+  EC:'🇪🇨', UY:'🇺🇾', PY:'🇵🇾', BO:'🇧🇴', US:'🇺🇸', GB:'🇬🇧', DE:'🇩🇪',
+  FR:'🇫🇷', IT:'🇮🇹', BR:'🇧🇷', PT:'🇵🇹', CH:'🇨🇭', BE:'🇧🇪', NL:'🇳🇱',
+};
+
+function renderTable() {
+  const tbody = document.getElementById('results-tbody');
+  let data = allResults;
+  if (currentFilter === 'valid') data = data.filter(r => r.valid);
+  if (currentFilter === 'invalid') data = data.filter(r => !r.valid);
+
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:30px;color:var(--text3)">Sin resultados</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.map(r => `
+    <tr>
+      <td style="color:var(--text3);font-family:monospace">${r.row}</td>
+      <td>${r.valid
+        ? '<span class="badge-valid">✓ válido</span>'
+        : `<span class="badge-invalid" title="${r.error||''}">✗ inválido</span>`}</td>
+      <td><span class="flag" title="${r.country||''}">${countryFlags[r.country]||r.country||'—'}</span></td>
+      <td><span class="num-normalized">${r.valid ? '+'+r.normalized : r.normalized||'—'}</span>
+          ${r.formatted ? `<br><span style="font-size:10px;color:var(--text3)">${r.formatted}</span>` : ''}</td>
+      <td><span class="num-original">${esc(r.original)}</span></td>
+      <td>${esc(r.name||'—')}</td>
+    </tr>`).join('');
+}
+
+function setFilter(f, btn) {
+  currentFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTable();
+}
+
+// ─── Export ───────────────────────────────────────────────────────────────────
+
+async function exportCSV(onlyValid) {
+  const res = await fetch(`${API}/normalize/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ results: allResults, onlyValid }),
+  });
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'contactos_normalizados.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function copyToClipboard() {
+  const valid = allResults.filter(r => r.valid);
+  const text = valid.map(r => r.normalized).join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    notify(`✅ ${valid.length} números copiados al portapapeles`);
+  });
+}
+
+async function importToCRM() {
+  const valid = allResults.filter(r => r.valid);
+  if (!valid.length) { notify('No hay números válidos para importar', 'warning'); return; }
+
+  if (!confirm(`¿Importar ${valid.length} contactos válidos al CRM?`)) return;
+
+  let imported = 0, skipped = 0;
+  for (const r of valid) {
+    const res = await apiFetch('/contacts', {
+      method: 'POST',
+      body: JSON.stringify({ phone: r.normalized, name: r.name || '', extra: r.extra || '' }),
+    });
+    if (res?.id || res?.phone) imported++; else skipped++;
+  }
+
+  notify(`✅ Importados: ${imported} · Ya existían: ${skipped}`);
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getCountry() { return document.getElementById('default-country').value; }
+
+function esc(str) {
+  return String(str||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(API + path, {
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    ...opts,
+  });
+  if (res.status === 401) { window.location.href = '/login'; return null; }
+  return res.json();
+}
+
+function notify(text, type = 'info') {
+  const el = document.getElementById('notifications');
+  const n = document.createElement('div');
+  n.className = `notif ${type === 'error' ? 'error' : type === 'warning' ? 'warning' : ''}`;
+  n.textContent = text;
+  el.appendChild(n);
+  setTimeout(() => n.remove(), 4000);
+}
+
+// Verificar auth al cargar
+fetch('/api/auth/me', { credentials: 'include' }).then(r => {
+  if (!r.ok) window.location.href = '/login';
+});
+</script>
+</body>
+</html>

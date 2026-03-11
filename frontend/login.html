@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WhatsApp CRM — Acceso</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #f0f4f8;
+    --surface: #ffffff;
+    --border: #e2e8f0;
+    --text: #1a202c;
+    --text2: #64748b;
+    --accent: #16a34a;
+    --accent-light: #dcfce7;
+    --error: #dc2626;
+    --shadow: 0 4px 24px rgba(0,0,0,0.08);
+  }
+
+  body {
+    font-family: 'Sora', sans-serif;
+    background: var(--bg);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* Geometric background */
+  body::before {
+    content: '';
+    position: fixed;
+    top: -40%;
+    right: -20%;
+    width: 600px;
+    height: 600px;
+    background: radial-gradient(circle, #bbf7d0 0%, transparent 70%);
+    pointer-events: none;
+  }
+  body::after {
+    content: '';
+    position: fixed;
+    bottom: -30%;
+    left: -15%;
+    width: 500px;
+    height: 500px;
+    background: radial-gradient(circle, #dbeafe 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    box-shadow: var(--shadow);
+    padding: 48px 40px;
+    width: 380px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .logo-area {
+    text-align: center;
+    margin-bottom: 36px;
+  }
+
+  .logo-icon {
+    width: 52px;
+    height: 52px;
+    background: var(--accent);
+    border-radius: 14px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 26px;
+    margin-bottom: 14px;
+  }
+
+  h1 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+
+  .subtitle {
+    font-size: 13px;
+    color: var(--text2);
+    font-weight: 300;
+  }
+
+  .field {
+    margin-bottom: 16px;
+  }
+
+  label {
+    display: block;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text2);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  input {
+    width: 100%;
+    padding: 11px 14px;
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    font-size: 14px;
+    font-family: 'Sora', sans-serif;
+    color: var(--text);
+    outline: none;
+    transition: border-color 0.2s;
+    background: #fafafa;
+  }
+
+  input:focus {
+    border-color: var(--accent);
+    background: #fff;
+  }
+
+  .btn-login {
+    width: 100%;
+    padding: 12px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: 'Sora', sans-serif;
+    cursor: pointer;
+    margin-top: 8px;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .btn-login:hover { background: #15803d; transform: translateY(-1px); }
+  .btn-login:active { transform: translateY(0); }
+  .btn-login:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+  .error-msg {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: var(--error);
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    margin-bottom: 16px;
+    display: none;
+  }
+
+  .error-msg.show { display: block; }
+
+  .footer-note {
+    text-align: center;
+    font-size: 11px;
+    color: #94a3b8;
+    margin-top: 28px;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo-area">
+    <div class="logo-icon">💬</div>
+    <h1 id="app-title">WhatsApp CRM</h1>
+    <p class="subtitle">Acceso al panel de agentes</p>
+  </div>
+
+  <div class="error-msg" id="error-box">Usuario o contraseña incorrectos</div>
+
+  <div class="field">
+    <label>Usuario</label>
+    <input type="text" id="username" placeholder="tu.usuario" autocomplete="username" autofocus>
+  </div>
+
+  <div class="field">
+    <label>Contraseña</label>
+    <input type="password" id="password" placeholder="••••••••" autocomplete="current-password">
+  </div>
+
+  <button class="btn-login" id="btn-login" onclick="doLogin()">
+    <span id="btn-text">Ingresar</span>
+  </button>
+
+  <p class="footer-note">Snow Motion · Panel interno</p>
+</div>
+
+<script>
+  // Set app name from server
+fetch('/api/auth/me').then(r => {
+  if (r.ok) r.json().then(d => { if(d && !d.error) window.location.href = '/'; });
+}).catch(() => {});
+
+  document.getElementById('password').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+
+  async function doLogin() {
+    const username = document.getElementById('username').value.trim();
+    const password = document.getElementById('password').value;
+    const btn = document.getElementById('btn-login');
+    const errBox = document.getElementById('error-box');
+
+    if (!username || !password) return;
+
+    btn.disabled = true;
+    document.getElementById('btn-text').textContent = 'Ingresando...';
+    errBox.classList.remove('show');
+
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+        credentials: 'include',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        window.location.href = '/';
+      } else {
+        errBox.textContent = data.error || 'Error al ingresar';
+        errBox.classList.add('show');
+        btn.disabled = false;
+        document.getElementById('btn-text').textContent = 'Ingresar';
+      }
+    } catch {
+      errBox.textContent = 'Error de conexión';
+      errBox.classList.add('show');
+      btn.disabled = false;
+      document.getElementById('btn-text').textContent = 'Ingresar';
+    }
+  }
+</script>
+</body>
+</html>

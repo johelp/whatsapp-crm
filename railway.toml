@@ -1,0 +1,10 @@
+# Railway detecta automáticamente Node.js
+# Este archivo configura el deploy
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "npm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

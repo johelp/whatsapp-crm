@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WhatsApp CRM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+
+<!-- ── SIDEBAR ─────────────────────────────────────────── -->
+<aside id="sidebar">
+  <div class="sidebar-top">
+    <div class="brand">
+      <span class="brand-icon">💬</span>
+      <span class="brand-name">WA CRM</span>
+    </div>
+    <div id="wa-pill" class="wa-status-pill disconnected" onclick="showPanel('settings')">
+      <span class="wa-dot"></span>
+      <span id="wa-status-text">Desconectado</span>
+    </div>
+  </div>
+
+  <nav class="nav-links">
+    <a class="nav-item active" data-panel="inbox" onclick="showPanel('inbox')" href="#">
+      <span class="nav-icon">💬</span>
+      <span class="nav-label">Bandeja</span>
+      <span class="nav-badge" id="badge-inbox" style="display:none">0</span>
+    </a>
+    <a class="nav-item" data-panel="campaigns" onclick="showPanel('campaigns')" href="#">
+      <span class="nav-icon">📢</span>
+      <span class="nav-label">Campañas</span>
+    </a>
+    <a class="nav-item" data-panel="contacts" onclick="showPanel('contacts')" href="#">
+      <span class="nav-icon">👥</span>
+      <span class="nav-label">Contactos</span>
+    </a>
+    <a class="nav-item" href="/normalizer.html" title="Normalizador de números">
+      <span class="nav-icon">🔢</span>
+      <span class="nav-label">Normalizar</span>
+    </a>
+    <a class="nav-item" data-panel="settings" onclick="showPanel('settings')" href="#">
+      <span class="nav-icon">⚙️</span>
+      <span class="nav-label">Config</span>
+    </a>
+  </nav>
+
+  <div class="sidebar-bottom">
+    <!-- Online agents -->
+    <div class="online-agents" id="online-agents"></div>
+    <!-- Current user -->
+    <div class="current-user" id="current-user-card">
+      <div class="user-avatar" id="my-avatar">?</div>
+      <div class="user-info">
+        <div class="user-name" id="my-name">—</div>
+        <div class="user-role" id="my-role">—</div>
+      </div>
+      <button class="btn-icon-sm" onclick="doLogout()" title="Cerrar sesión">⏻</button>
+    </div>
+  </div>
+</aside>
+
+<!-- ── MAIN CONTENT ────────────────────────────────────── -->
+<main id="main">
+
+  <!-- ═══ INBOX ════════════════════════════════════════════ -->
+  <section class="panel active" id="panel-inbox">
+    <!-- Chat list column -->
+    <div class="chat-list-col">
+      <div class="col-header">
+        <div class="col-header-top">
+          <h2>Conversaciones</h2>
+          <div class="header-filters">
+            <button class="filter-btn active" data-status="all" onclick="setStatusFilter('all',this)">Todas</button>
+            <button class="filter-btn" data-status="open" onclick="setStatusFilter('open',this)">Abiertas</button>
+            <button class="filter-btn" data-status="pending" onclick="setStatusFilter('pending',this)">Pendientes</button>
+            <button class="filter-btn mine" onclick="toggleMineFilter(this)">Mis chats</button>
+          </div>
+        </div>
+        <div class="search-wrap">
+          <span class="search-icon">🔍</span>
+          <input class="search-input" id="chat-search" placeholder="Buscar..." oninput="filterConversations()">
+        </div>
+        <div class="label-chips" id="label-chips"></div>
+      </div>
+      <div class="chat-list" id="chat-list">
+        <div class="list-empty">Cargando...</div>
+      </div>
+    </div>
+
+    <!-- Chat view -->
+    <div class="chat-view" id="chat-view">
+      <div class="chat-empty" id="chat-empty">
+        <div class="empty-icon">💬</div>
+        <p>Seleccioná una conversación</p>
+        <span>o esperá mensajes nuevos</span>
+      </div>
+
+      <div class="chat-active" id="chat-active">
+        <!-- Header -->
+        <header class="chat-header" id="chat-header">
+          <div class="chat-avatar-lg" id="ch-avatar">?</div>
+          <div class="chat-header-info">
+            <div class="ch-name" id="ch-name">—</div>
+            <div class="ch-meta">
+              <span id="ch-phone" class="ch-phone">—</span>
+              <span id="ch-company" class="ch-company"></span>
+            </div>
+            <div id="ch-labels" class="ch-labels"></div>
+          </div>
+          <div class="chat-header-actions">
+            <div id="viewing-indicator" class="viewing-indicator"></div>
+            <select class="status-select" id="conv-status-sel" onchange="updateConvStatus()">
+              <option value="open">🟢 Abierto</option>
+              <option value="pending">🟡 Pendiente</option>
+              <option value="resolved">⚫ Resuelto</option>
+            </select>
+            <select class="status-select" id="conv-assign-sel" onchange="updateConvAssign()">
+              <option value="">Sin asignar</option>
+            </select>
+            <button class="btn-icon-md" id="btn-save-contact" onclick="saveContactFromChat()" title="Guardar contacto">👤</button>
+            <button class="btn-icon-md" onclick="deleteConversationPrompt()" title="Eliminar conversación">🗑</button>
+            <button class="btn-icon-md" id="btn-toggle-sidebar" onclick="toggleInfoSidebar()" title="Info y etiquetas">☰</button>
+          </div>
+        </header>
+
+        <!-- Messages -->
+        <div class="messages-area" id="messages-area"></div>
+
+        <!-- Typing indicator -->
+        <div class="remote-typing" id="remote-typing" style="display:none">
+          <span id="typing-text">Alguien está escribiendo...</span>
+        </div>
+
+        <!-- Composer -->
+        <div class="composer" id="composer">
+          <div class="qr-popup" id="qr-popup" style="display:none"></div>
+          <div class="qr-popup" id="file-popup" style="display:none;max-height:280px"></div>
+          <div class="composer-inner">
+            <button class="btn-composer" onclick="toggleQRPopup()" title="Respuestas rápidas (/)">⚡</button>
+            <button class="btn-composer" onclick="toggleFilePopup()" title="Enviar archivo de biblioteca">📎</button>
+            <textarea
+              id="msg-input"
+              class="msg-input"
+              placeholder="Escribí aquí... (/ para respuestas rápidas)"
+              rows="1"
+              onkeydown="handleKey(event)"
+              oninput="handleInput(event)"
+            ></textarea>
+            <button class="btn-send" onclick="sendMsg()" title="Enviar (Enter)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Info sidebar -->
+    <div class="info-sidebar" id="info-sidebar">
+      <div class="info-section">
+        <h4>Etiquetas</h4>
+        <div id="conv-labels-active"></div>
+        <div id="conv-labels-add" class="labels-add-grid"></div>
+      </div>
+      <div class="info-section">
+        <h4>Datos del bot</h4>
+        <div id="bot-data-view" class="bot-data"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ CAMPAIGNS ════════════════════════════════════════ -->
+  <section class="panel" id="panel-campaigns">
+    <div class="panel-topbar">
+      <div>
+        <h2>Campañas</h2>
+        <p class="panel-subtitle">Envíos masivos · anti-ban automático</p>
+      </div>
+      <button class="btn-primary" onclick="openCampaignModal()">+ Nueva campaña</button>
+    </div>
+    <div class="panel-content">
+      <div class="campaigns-grid" id="campaigns-grid">
+        <div class="list-empty" style="grid-column:span 2">Cargando...</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ CONTACTS ═════════════════════════════════════════ -->
+  <section class="panel" id="panel-contacts">
+    <div class="panel-topbar">
+      <div>
+        <h2>Contactos</h2>
+        <p class="panel-subtitle" id="contacts-count">—</p>
+      </div>
+      <div style="display:flex;gap:8px">
+        <label class="btn-secondary" for="csv-import-input">⬆ Importar CSV</label>
+        <input type="file" id="csv-import-input" accept=".csv" style="display:none" onchange="importCSV(event)">
+        <button class="btn-primary" onclick="openContactModal()">+ Agregar</button>
+      </div>
+    </div>
+    <div class="panel-content">
+      <div class="table-toolbar">
+        <input class="search-input" id="contacts-search" placeholder="🔍 Buscar contacto..." oninput="renderContactsTable()" style="max-width:280px">
+        <div class="label-chips" id="contacts-label-chips" style="flex:1"></div>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Nombre</th><th>Teléfono</th><th>Empresa</th><th>Extra</th><th>Etiquetas</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="contacts-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ SETTINGS ═════════════════════════════════════════ -->
+  <section class="panel" id="panel-settings">
+    <div class="panel-topbar">
+      <div><h2>Configuración</h2><p class="panel-subtitle">Agentes, etiquetas, respuestas y WhatsApp</p></div>
+    </div>
+    <div class="panel-content settings-grid" id="settings-grid"></div>
+  </section>
+
+</main>
+
+<!-- ── NOTIFICATIONS ──────────────────────────────────── -->
+<div id="notifications"></div>
+
+<!-- ── CAMPAIGN PROGRESS TOAST ────────────────────────── -->
+<div class="campaign-toast" id="campaign-toast">
+  <div class="ct-header">
+    <span class="ct-icon">📢</span>
+    <span class="ct-name" id="ct-name">Campaña</span>
+    <button class="btn-icon-sm" onclick="cancelActiveCampaign()" title="Cancelar">✕</button>
+  </div>
+  <div class="ct-stats" id="ct-stats">Preparando...</div>
+  <div class="ct-bar"><div class="ct-bar-fill" id="ct-bar-fill"></div></div>
+  <div class="ct-pause" id="ct-pause" style="display:none">⏸ Pausa anti-ban...</div>
+</div>
+
+<!-- ── BOT ALERT ──────────────────────────────────────── -->
+<div class="bot-alerts" id="bot-alerts"></div>
+
+<!-- ════════════════════════════════════════════════════
+     MODALS
+════════════════════════════════════════════════════ -->
+
+<!-- QR Modal -->
+<div class="modal-overlay" id="modal-qr">
+  <div class="modal" style="width:320px;text-align:center">
+    <h3>Conectar WhatsApp</h3>
+    <p class="modal-subtitle" id="qr-subtitle">Escaneá el código QR con tu teléfono</p>
+    <div class="qr-wrap">
+      <img id="qr-image" src="" alt="QR" style="display:none;width:200px;height:200px;border:3px solid #fff;border-radius:8px">
+      <div class="qr-waiting" id="qr-waiting">
+        <div class="spinner"></div>
+        <p>Generando QR...</p>
+      </div>
+    </div>
+    <button class="btn-secondary" onclick="closeModal('modal-qr')" style="margin-top:16px">Cerrar</button>
+  </div>
+</div>
+
+<!-- Campaign Modal -->
+<div class="modal-overlay" id="modal-campaign">
+  <div class="modal modal-lg">
+    <h3 id="camp-modal-title">Nueva Campaña</h3>
+
+    <div class="modal-tabs" id="camp-modal-tabs">
+      <button class="modal-tab active" onclick="switchCampTab('info',this)">📋 Información</button>
+      <button class="modal-tab" onclick="switchCampTab('contacts',this)" id="camp-tab-contacts">👥 Contactos</button>
+    </div>
+
+    <!-- Tab: Info -->
+    <div class="modal-body" id="camp-tab-info">
+      <input type="hidden" id="c-id">
+      <div class="form-row-2">
+        <div class="field">
+          <label>Nombre *</label>
+          <input class="input" id="c-name" placeholder="Ej: Solicitud reseñas Marzo">
+        </div>
+        <div class="field">
+          <label>Tipo</label>
+          <select class="input" id="c-type">
+            <option value="review">⭐ Reseñas</option>
+            <option value="notice">📢 Aviso general</option>
+            <option value="followup">🔄 Seguimiento</option>
+            <option value="budget">💰 Presupuesto</option>
+            <option value="general">📋 General</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Plantilla del mensaje *</label>
+        <textarea class="input" id="c-template" rows="5" placeholder="Hola {{nombre}}! 👋 ..."></textarea>
+        <p class="field-hint">Variables: <code>{{nombre}}</code> <code>{{empresa}}</code> <code>{{extra}}</code> <code>{{telefono}}</code></p>
+      </div>
+      <div class="form-row-2">
+        <div class="field">
+          <label>Delay mínimo (seg)</label>
+          <input class="input" type="number" id="c-dmin" value="8" min="5">
+        </div>
+        <div class="field">
+          <label>Delay máximo (seg)</label>
+          <input class="input" type="number" id="c-dmax" value="25" min="10">
+        </div>
+      </div>
+      <div class="field">
+        <label>Programar envío (opcional)</label>
+        <input class="input" type="datetime-local" id="c-schedule">
+      </div>
+      <div class="field">
+        <button class="btn-secondary btn-sm" onclick="previewMsg()">👁 Preview del mensaje</button>
+      </div>
+      <div class="preview-box" id="c-preview" style="display:none"></div>
+    </div>
+
+    <!-- Tab: Contacts -->
+    <div class="modal-body" id="camp-tab-contacts-body" style="display:none">
+      <div class="field">
+        <label>Agregar números (teléfono,nombre,extra — uno por línea)</label>
+        <textarea class="input mono" id="c-contacts" rows="5" placeholder="5491123456789,Juan García,VIP&#10;34612345678,María López"></textarea>
+        <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap">
+          <label class="btn-secondary btn-sm" for="c-csv-input" style="cursor:pointer">📎 Importar CSV</label>
+          <input type="file" id="c-csv-input" accept=".csv" style="display:none" onchange="loadCampaignCSV(event)">
+          <button class="btn-primary btn-sm" onclick="addContactsToCampaign()">+ Agregar a campaña</button>
+        </div>
+      </div>
+
+      <!-- Existing contacts table -->
+      <div id="camp-contacts-list" style="margin-top:12px">
+        <div style="font-size:12px;color:var(--text3);margin-bottom:8px">Contactos cargados: <b id="camp-contacts-count">0</b></div>
+        <div style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius)">
+          <table class="data-table" style="font-size:12px">
+            <thead>
+              <tr><th>Teléfono</th><th>Nombre</th><th>Extra</th><th>Estado</th><th></th></tr>
+            </thead>
+            <tbody id="camp-contacts-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-campaign')">Cerrar</button>
+      <button class="btn-danger btn-sm" id="btn-delete-camp" onclick="deleteCampaign()" style="display:none">🗑 Eliminar</button>
+      <button class="btn-secondary btn-sm" id="btn-reset-camp" onclick="resetCampaign()" style="display:none" title="Volver a borrador para reenviar">↺ Reiniciar</button>
+      <button class="btn-primary" id="btn-save-camp" onclick="saveCampaign()">Crear campaña</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete Conversation Modal -->
+<div class="modal-overlay" id="modal-delete-conv">
+  <div class="modal" style="max-width:420px">
+    <h3>🗑 Eliminar conversación</h3>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--text2)">¿Qué querés eliminar de <b id="del-conv-name">este contacto</b>?</p>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px">
+        <label style="display:flex;align-items:flex-start;gap:10px;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);cursor:pointer" id="del-opt-soft">
+          <input type="radio" name="del-mode" value="soft" checked style="margin-top:2px">
+          <div>
+            <div style="font-size:13px;font-weight:500">Solo del CRM</div>
+            <div style="font-size:11px;color:var(--text3)">Elimina la conversación y los mensajes de la base de datos. WhatsApp no se modifica.</div>
+          </div>
+        </label>
+        <label style="display:flex;align-items:flex-start;gap:10px;padding:10px;border:1.5px solid var(--border);border-radius:var(--radius);cursor:pointer" id="del-opt-hard">
+          <input type="radio" name="del-mode" value="hard" style="margin-top:2px">
+          <div>
+            <div style="font-size:13px;font-weight:500;color:var(--red)">Eliminar todo (incluyendo mensajes)</div>
+            <div style="font-size:11px;color:var(--text3)">Elimina conversación y todos los mensajes del historial. No se puede deshacer.</div>
+          </div>
+        </label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-delete-conv')">Cancelar</button>
+      <button class="btn-danger" onclick="confirmDeleteConversation()">Eliminar</button>
+    </div>
+  </div>
+</div>
+
+<!-- File Library Modal -->
+<div class="modal-overlay" id="modal-files">
+  <div class="modal modal-lg">
+    <h3>📎 Biblioteca de archivos</h3>
+    <div class="modal-tabs">
+      <button class="modal-tab active" onclick="switchFileTab('list',this)">📋 Archivos</button>
+      <button class="modal-tab" onclick="switchFileTab('upload',this)">⬆ Subir archivo</button>
+    </div>
+
+    <!-- Lista -->
+    <div class="modal-body" id="file-tab-list">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px" id="file-cat-filters"></div>
+      <div style="max-height:360px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius)">
+        <table class="data-table" style="font-size:12px">
+          <thead><tr><th>Nombre</th><th>Tipo</th><th>Categoría</th><th>Tamaño</th><th>Usos</th><th></th></tr></thead>
+          <tbody id="files-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Upload -->
+    <div class="modal-body" id="file-tab-upload" style="display:none">
+      <div style="border:2px dashed var(--border2);border-radius:var(--radius);padding:24px;text-align:center;cursor:pointer"
+           onclick="document.getElementById('file-upload-input').click()"
+           id="file-drop-zone">
+        <div style="font-size:28px;margin-bottom:6px">📁</div>
+        <p style="font-size:13px;font-weight:500">Clic para seleccionar archivo</p>
+        <p style="font-size:11px;color:var(--text3);margin-top:4px" id="file-upload-name">PDF, imagen, documento — máx 20MB</p>
+      </div>
+      <input type="file" id="file-upload-input" style="display:none" accept=".pdf,.jpg,.jpeg,.png,.gif,.mp4,.doc,.docx,.xls,.xlsx" onchange="handleFileSelect(event)">
+      <div class="form-row-2">
+        <div class="field">
+          <label>Nombre para mostrar *</label>
+          <input class="input" id="fu-name" placeholder="Ej: Tarifario 2025">
+        </div>
+        <div class="field">
+          <label>Categoría</label>
+          <select class="input" id="fu-category">
+            <option value="general">General</option>
+            <option value="tarifario">Tarifario</option>
+            <option value="politicas">Políticas</option>
+            <option value="promociones">Promociones</option>
+            <option value="contratos">Contratos</option>
+            <option value="imagenes">Imágenes</option>
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label>Descripción (opcional)</label>
+        <input class="input" id="fu-description" placeholder="Descripción breve del archivo">
+      </div>
+      <button class="btn-primary" onclick="uploadFile()">⬆ Subir archivo</button>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-files')">Cerrar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Contact Modal -->
+<div class="modal-overlay" id="modal-contact">
+  <div class="modal">
+    <h3 id="contact-modal-title">Agregar contacto</h3>
+    <input type="hidden" id="ct-id">
+    <div class="modal-body">
+      <div class="field">
+        <label>Teléfono *</label>
+        <input class="input mono" id="ct-phone" placeholder="5491123456789">
+      </div>
+      <div class="form-row-2">
+        <div class="field"><label>Nombre</label><input class="input" id="ct-name" placeholder="Juan García"></div>
+        <div class="field"><label>Empresa</label><input class="input" id="ct-company" placeholder="Empresa"></div>
+      </div>
+      <div class="field"><label>Campo extra</label><input class="input" id="ct-extra" placeholder="Grupo, categoría, etc."></div>
+      <div class="field"><label>Notas internas</label><textarea class="input" id="ct-notes" rows="2" placeholder="Notas privadas..."></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-contact')">Cancelar</button>
+      <button class="btn-primary" onclick="saveContact()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Quick Reply Modal -->
+<div class="modal-overlay" id="modal-qr-edit">
+  <div class="modal">
+    <h3 id="qre-title">Respuesta rápida</h3>
+    <input type="hidden" id="qre-id">
+    <div class="modal-body">
+      <div class="form-row-2">
+        <div class="field"><label>Nombre</label><input class="input" id="qre-name" placeholder="Bienvenida"></div>
+        <div class="field"><label>Trigger (/...)</label><input class="input mono" id="qre-trigger" placeholder="/hola"></div>
+      </div>
+      <div class="field"><label>Categoría</label><input class="input" id="qre-category" placeholder="general"></div>
+      <div class="field">
+        <label>Mensaje</label>
+        <textarea class="input" id="qre-content" rows="4" placeholder="¡Hola {{nombre}}! ..."></textarea>
+        <p class="field-hint">Variables: <code>{{nombre}}</code> <code>{{empresa}}</code> <code>{{extra}}</code></p>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-qr-edit')">Cancelar</button>
+      <button class="btn-primary" onclick="saveQR()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Label Modal -->
+<div class="modal-overlay" id="modal-label">
+  <div class="modal" style="max-width:380px">
+    <h3 id="lbl-title">Nueva etiqueta</h3>
+    <input type="hidden" id="lbl-id">
+    <div class="modal-body">
+      <div class="field"><label>Nombre *</label><input class="input" id="lbl-name" placeholder="Consulta general"></div>
+      <div class="form-row-2">
+        <div class="field"><label>Color</label><input class="input" type="color" id="lbl-color" value="#3b82f6"></div>
+        <div class="field"><label>Descripción</label><input class="input" id="lbl-desc" placeholder="Opcional"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-label')">Cancelar</button>
+      <button class="btn-primary" onclick="saveLabel()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- User Modal -->
+<div class="modal-overlay" id="modal-user">
+  <div class="modal" style="max-width:400px">
+    <h3 id="usr-title">Nuevo agente</h3>
+    <input type="hidden" id="usr-id">
+    <div class="modal-body">
+      <div class="form-row-2">
+        <div class="field"><label>Usuario *</label><input class="input mono" id="usr-username" placeholder="juan.garcia"></div>
+        <div class="field"><label>Nombre visible</label><input class="input" id="usr-display" placeholder="Juan García"></div>
+      </div>
+      <div class="form-row-2">
+        <div class="field"><label>Contraseña</label><input class="input" type="password" id="usr-password" placeholder="mínimo 6 caracteres"></div>
+        <div class="field"><label>Color</label><input class="input" type="color" id="usr-color" value="#6366f1"></div>
+      </div>
+      <div class="field">
+        <label>Rol</label>
+        <select class="input" id="usr-role">
+          <option value="agent">Agente</option>
+          <option value="admin">Administrador</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-secondary" onclick="closeModal('modal-user')">Cancelar</button>
+      <button class="btn-primary" onclick="saveUser()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>
