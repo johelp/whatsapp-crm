@@ -1,18 +1,15 @@
 /**
  * baileys.js — Conexion WhatsApp con Baileys
+ * Usa dynamic import() para compatibilidad con Node 18/20/22 (ESM)
  */
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-  getContentType,
-} = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
 const qrcode = require('qrcode');
 const { query, queryOne } = require('./db');
+
+// Baileys se importa dinámicamente en connect() por ser ESM puro
+let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType;
 
 const AUTH_PATH = process.env.WA_AUTH_PATH
   ? path.resolve(process.env.WA_AUTH_PATH)
@@ -275,6 +272,16 @@ async function processMessage(msg) {
 // ─── Connect ──────────────────────────────────────────────────────────────────
 
 async function connect() {
+  // Importar Baileys dinámicamente (es un módulo ESM)
+  if (!makeWASocket) {
+    const baileys = await import('@whiskeysockets/baileys');
+    makeWASocket = baileys.default;
+    useMultiFileAuthState = baileys.useMultiFileAuthState;
+    DisconnectReason = baileys.DisconnectReason;
+    fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+    getContentType = baileys.getContentType;
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
   const { version } = await fetchLatestBaileysVersion();
 
