@@ -57,7 +57,11 @@ async function query(sql, params = []) {
       .replace(/ON CONFLICT DO NOTHING/gi, 'ON CONFLICT DO NOTHING')
       .replace(/INSERT OR IGNORE/gi, 'INSERT')
       .replace(/ON CONFLICT\s*\(([^)]+)\)\s*DO UPDATE SET/gi, 'ON CONFLICT ($1) DO UPDATE SET')
-      .replace(/AUTOINCREMENT/gi, '');
+      .replace(/AUTOINCREMENT/gi, '')
+      .replace(/datetime\s*\(\s*'now'\s*\)/gi, 'NOW()')
+      .replace(/datetime\s*\(\s*"now"\s*\)/gi, 'NOW()')
+      .replace(/DEFAULT\s+\(datetime\s*\(\s*'now'\s*\)\)/gi, "DEFAULT NOW()")
+      .replace(/strftime\s*\([^)]+\)/gi, 'NOW()');
     const result = await pgPool.query(pgSql, params);
     return result.rows;
   }
@@ -115,7 +119,15 @@ async function queryOne(sql, params = []) {
 
 async function execute(sql) {
   if (USE_PG) {
-    const stmts = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
+    // Transformar SQLite → PostgreSQL
+    const pgSql = sql
+      .replace(/INTEGER PRIMARY KEY AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY')
+      .replace(/DEFAULT\s+\(datetime\s*\(\s*'now'\s*\)\)/gi, 'DEFAULT NOW()')
+      .replace(/datetime\s*\(\s*'now'\s*\)/gi, 'NOW()')
+      .replace(/TEXT DEFAULT \(datetime/gi, 'TIMESTAMPTZ DEFAULT (NOW')
+      .replace(/\bTEXT\b(?=\s+DEFAULT NOW\(\))/gi, 'TIMESTAMPTZ');
+
+    const stmts = pgSql.split(';').map(s => s.trim()).filter(s => s.length > 0);
     for (const stmt of stmts) {
       await pgPool.query(stmt).catch(e => {
         if (!e.message.includes('already exists')) throw e;
