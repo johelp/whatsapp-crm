@@ -127,17 +127,22 @@ io.on('connection', (socket) => {
   });
 });
 
-// ─── Cron: campanas programadas ───────────────────────────────────────────────
+// ─── Cron: campañas programadas ───────────────────────────────────────────────
 
 cron.schedule('* * * * *', async () => {
   if (isRunning()) return;
   const { query } = require('./db');
   try {
+    const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
     const scheduled = await query(
-      "SELECT * FROM campaigns WHERE status = 'draft' AND scheduled_at IS NOT NULL AND scheduled_at <= datetime('now') LIMIT 1"
-    );
+      "SELECT * FROM campaigns WHERE status = 'draft' AND scheduled_at IS NOT NULL AND scheduled_at <= $1 LIMIT 1",
+      [now]
+    ).catch(() => query(
+      "SELECT * FROM campaigns WHERE status = 'draft' AND scheduled_at IS NOT NULL AND scheduled_at <= ? LIMIT 1",
+      [now]
+    ));
     if (scheduled.length) {
-      console.log(`Ejecutando campana programada: ${scheduled[0].name}`);
+      console.log(`Ejecutando campaña programada: ${scheduled[0].name}`);
       runCampaign(scheduled[0].id, scheduled[0].created_by).catch(console.error);
     }
   } catch (e) { /* silent */ }
@@ -149,12 +154,20 @@ async function start() {
   await initDB();
   setIO(io);
   setSenderIO(io);
-  await connect();
 
-  httpServer.listen(PORT, () => {
-    console.log(`\nWhatsApp CRM corriendo en http://localhost:${PORT}`);
-    console.log(`DB: ${USE_PG ? 'PostgreSQL' : 'SQLite (local)'}`);
-    console.log(`Login: admin / admin123\n`);
+  // Escuchar PRIMERO — Railway necesita que el puerto esté disponible rápido
+  await new Promise(resolve => {
+    httpServer.listen(PORT, () => {
+      console.log(`\nWhatsApp CRM corriendo en http://localhost:${PORT}`);
+      console.log(`DB: ${USE_PG ? 'PostgreSQL' : 'SQLite (local)'}`);
+      console.log(`Login: admin / admin123\n`);
+      resolve();
+    });
+  });
+
+  // Conectar Baileys en background — no bloquea el startup
+  connect().catch(err => {
+    console.error('Error conectando WhatsApp (reintentando):', err.message);
   });
 }
 
