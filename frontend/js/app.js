@@ -1680,6 +1680,49 @@ async function renderSettings() {
       <p style="font-size:12px;color:var(--text3);margin-bottom:14px">Respuestas automáticas inteligentes usando IA. Se activa fuera del horario laboral o cuando configurés.</p>
       <div id="ai-config-form">Cargando configuración...</div>
     </div>` : ''}
+
+    <!-- Sistema (solo admin) -->
+    ${isAdmin ? `
+    <div class="settings-card full" id="system-admin-card">
+      <h3>⚙️ Administración del sistema</h3>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:16px">Herramientas de mantenimiento. Todas las acciones requieren tu contraseña de acceso.</p>
+      <div id="system-stats-box" style="margin-bottom:20px">Cargando estadísticas...</div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin-bottom:20px">
+
+      <h4 style="margin-bottom:4px">🔧 Reparar base de datos</h4>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:10px">Aplica migraciones faltantes, corrige índices y valores NULL. Seguro de ejecutar en cualquier momento.</p>
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div class="field" style="min-width:180px">
+          <label>Tu contraseña</label>
+          <input class="input" type="password" id="sys-pwd-repair" placeholder="••••••••">
+        </div>
+        <button class="btn-secondary" onclick="systemRepairDB()">🔧 Reparar DB</button>
+      </div>
+      <div id="repair-result" style="margin-top:8px;font-size:12px"></div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+
+      <h4 style="margin-bottom:4px;color:var(--red)">🗑️ Resetear datos</h4>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:10px">Elimina mensajes, conversaciones o contactos. <b>Irreversible.</b> No afecta usuarios, configuración ni sesión de WhatsApp.</p>
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+        <div class="field" style="min-width:160px">
+          <label>¿Qué eliminar?</label>
+          <select class="input" id="sys-reset-scope">
+            <option value="messages">Solo mensajes</option>
+            <option value="conversations">Conversaciones (sin contactos)</option>
+            <option value="contacts">Solo contactos</option>
+            <option value="activity">Solo log de actividad</option>
+            <option value="all">TODO (mensajes + convs + contactos + log)</option>
+          </select>
+        </div>
+        <div class="field" style="min-width:180px">
+          <label>Tu contraseña</label>
+          <input class="input" type="password" id="sys-pwd-reset" placeholder="••••••••">
+        </div>
+        <button class="btn-danger" onclick="systemReset()">⚠️ Resetear</button>
+      </div>
+    </div>` : ''}
   `;
 
   renderQRListSettings();
@@ -1687,6 +1730,7 @@ async function renderSettings() {
   if (isAdmin) {
     renderUsersListSettings();
     loadAIConfig();
+    loadSystemStats();
   }
 }
 
@@ -2169,6 +2213,80 @@ async function saveAIConfig() {
     loadAIConfig(); // refrescar pill de estado
   } else {
     notify(res?.error || 'Error guardando', 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SISTEMA / ADMINISTRACIÓN
+// ═══════════════════════════════════════════════════════════════
+
+async function loadSystemStats() {
+  const el = document.getElementById('system-stats-box');
+  if (!el) return;
+  const s = await apiFetch('/system/stats');
+  if (!s) { el.innerHTML = '<p style="color:var(--red);font-size:12px">Error cargando estadísticas</p>'; return; }
+  const fmt = n => Number(n || 0).toLocaleString('es-AR');
+  const fmtDate = t => t ? new Date(Number(t)).toLocaleString('es-AR') : '—';
+  el.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px">
+      ${[
+        ['💬', 'Conversaciones', fmt(s.conversations)],
+        ['📨', 'Mensajes', fmt(s.messages)],
+        ['👤', 'Contactos', fmt(s.contacts)],
+        ['🧑‍💼', 'Usuarios activos', fmt(s.active_users)],
+      ].map(([icon, label, val]) => `
+        <div style="background:var(--surface2);border-radius:var(--radius);padding:10px;text-align:center">
+          <div style="font-size:20px">${icon}</div>
+          <div style="font-size:22px;font-weight:700;color:var(--text1)">${val}</div>
+          <div style="font-size:11px;color:var(--text3)">${label}</div>
+        </div>`).join('')}
+    </div>
+    <div style="font-size:11px;color:var(--text3)">
+      Mensaje más antiguo: ${fmtDate(s.oldest_message)} · Más reciente: ${fmtDate(s.newest_message)}
+    </div>`;
+}
+
+async function systemRepairDB() {
+  const pwd = document.getElementById('sys-pwd-repair')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña', 'error'); return; }
+  const el = document.getElementById('repair-result');
+  el.textContent = 'Ejecutando...';
+  const res = await apiFetch('/system/repair-db', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+  if (res?.ok) {
+    const ok  = res.results.filter(r => r.ok).length;
+    const err = res.results.filter(r => !r.ok).length;
+    el.innerHTML = `<span style="color:var(--wa)">✅ ${ok} operaciones OK</span>${err ? ` <span style="color:var(--amber)">· ${err} omitidas (ya aplicadas)</span>` : ''}`;
+    notify('✅ Reparación completada');
+    document.getElementById('sys-pwd-repair').value = '';
+    await loadSystemStats();
+  } else {
+    el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
+    notify(res?.error || 'Error', 'error');
+  }
+}
+
+async function systemReset() {
+  const scope = document.getElementById('sys-reset-scope')?.value;
+  const pwd   = document.getElementById('sys-pwd-reset')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña', 'error'); return; }
+
+  const labels = {
+    messages: 'todos los mensajes',
+    conversations: 'todas las conversaciones',
+    contacts: 'todos los contactos',
+    activity: 'el log de actividad',
+    all: 'TODOS LOS DATOS (mensajes, conversaciones, contactos y log)',
+  };
+  if (!confirm(`⚠️ ¿Confirmar eliminación de ${labels[scope]}?\n\nEsta acción es IRREVERSIBLE.`)) return;
+
+  const res = await apiFetch('/system/reset', { method: 'POST', body: JSON.stringify({ password: pwd, scope }) });
+  if (res?.ok) {
+    const d = res.deleted;
+    notify(`✅ Reset OK: ${Object.entries(d).map(([k,v]) => `${v} ${k}`).join(', ')}`);
+    document.getElementById('sys-pwd-reset').value = '';
+    await loadSystemStats();
+  } else {
+    notify(res?.error || 'Error', 'error');
   }
 }
 

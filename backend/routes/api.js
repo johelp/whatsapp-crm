@@ -732,4 +732,102 @@ router.delete('/ai-documents/:id', requireAuth, requireAdmin, async (req, res) =
   res.json({ ok: true });
 });
 
+// ─── Sistema / Administración ─────────────────────────────────────────────────
+
+// Estadísticas del sistema (para el panel admin)
+router.get('/system/stats', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const [convs, msgs, contacts, users] = await Promise.all([
+      queryOne('SELECT COUNT(*) as n FROM conversations'),
+      queryOne('SELECT COUNT(*) as n FROM messages'),
+      queryOne('SELECT COUNT(*) as n FROM contacts'),
+      queryOne('SELECT COUNT(*) as n FROM users WHERE is_active = 1'),
+    ]);
+    const oldestMsg = await queryOne('SELECT MIN(timestamp) as t FROM messages');
+    const newestMsg = await queryOne('SELECT MAX(timestamp) as t FROM messages');
+    res.json({
+      conversations: convs?.n || 0,
+      messages: msgs?.n || 0,
+      contacts: contacts?.n || 0,
+      active_users: users?.n || 0,
+      oldest_message: oldestMsg?.t,
+      newest_message: newestMsg?.t,
+    });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reset/limpieza del sistema — requiere contraseña de confirmación
+router.post('/system/reset', requireAuth, requireAdmin, async (req, res) => {
+  const { password, scope } = req.body;
+
+  // Verificar contraseña del admin actual
+  const adminUser = await queryOne('SELECT password_hash FROM users WHERE id = ?', [req.session.user.id]);
+  if (!adminUser) return res.status(403).json({ error: 'Sin autorización' });
+  const valid = await bcrypt.compare(password, adminUser.password_hash);
+  if (!valid) return res.status(403).json({ error: 'Contraseña incorrecta' });
+
+  const deleted = {};
+  try {
+    if (scope === 'messages' || scope === 'all') {
+      const r = await query('DELETE FROM messages');
+      deleted.messages = r.rowCount || 0;
+    }
+    if (scope === 'conversations' || scope === 'all') {
+      const r = await query('DELETE FROM conversations');
+      deleted.conversations = r.rowCount || 0;
+    }
+    if (scope === 'contacts' || scope === 'all') {
+      const r = await query('DELETE FROM contacts');
+      deleted.contacts = r.rowCount || 0;
+    }
+    if (scope === 'activity' || scope === 'all') {
+      const r = await query('DELETE FROM activity_log');
+      deleted.activity = r.rowCount || 0;
+    }
+    // Nunca borra usuarios, config, ni credenciales WA
+    console.log(`[SYSTEM RESET] scope=${scope} by user ${req.session.user.id}:`, deleted);
+    res.json({ ok: true, deleted });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Reparar DB: corregir índice unique en messages si falta, sincronizar migraciones
+router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => {
+  const { password } = req.body;
+  const adminUser = await queryOne('SELECT password_hash FROM users WHERE id = ?', [req.session.user.id]);
+  const valid = adminUser && await bcrypt.compare(password, adminUser.password_hash);
+  if (!valid) return res.status(403).json({ error: 'Contraseña incorrecta' });
+
+  const results = [];
+  const ops = [
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1`,
+    `CREATE TABLE IF NOT EXISTS ai_documents (
+      id SERIAL PRIMARY KEY, name TEXT NOT NULL, content TEXT NOT NULL,
+      file_type TEXT DEFAULT 'text', size INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1, created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    // Forzar is_active = 1 donde está NULL
+    `UPDATE users SET is_active = 1 WHERE is_active IS NULL`,
+    // Asegurar que conversations tiene columnas de timestamps
+    `UPDATE conversations SET last_message_at = NOW() WHERE last_message_at IS NULL AND last_message IS NOT NULL`,
+  ];
+
+  for (const sql of ops) {
+    try {
+      await query(sql);
+      results.push({ sql: sql.substring(0, 60) + '…', ok: true });
+    } catch(e) {
+      results.push({ sql: sql.substring(0, 60) + '…', ok: false, err: e.message.substring(0, 80) });
+    }
+  }
+  console.log('[SYSTEM REPAIR-DB]', results);
+  res.json({ ok: true, results });
+});
+
 module.exports = router;

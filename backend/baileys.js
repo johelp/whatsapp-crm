@@ -440,7 +440,16 @@ async function sendMessage(phone, text, sentBy = null) {
     throw new Error('WhatsApp no está conectado');
   }
 
-  const jid = normalizeJid(phone);
+  // Resolver el JID correcto — algunos contactos usan @lid en vez de @s.whatsapp.net
+  let jid = normalizeJid(phone);
+  try {
+    const [result] = await sock.onWhatsApp(jid);
+    if (result?.exists && result?.jid) {
+      jid = result.jid; // usar el JID real que devuelve WA (puede ser @lid)
+    }
+  } catch(e) {
+    // Si onWhatsApp falla, seguir con el JID normalizado
+  }
 
   await sock.presenceSubscribe(jid).catch(() => {});
   await sock.sendPresenceUpdate('composing', jid);
@@ -457,22 +466,20 @@ async function sendMessage(phone, text, sentBy = null) {
     is_auto_reply: 0, sent_by: sentBy,
   });
 
-  // Upsert conversación saliente
   const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
   if (existing) {
     await query(
-      `UPDATE conversations SET last_message = ?, last_message_at = datetime('now'), updated_at = datetime('now') WHERE jid = ?`,
+      `UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`,
       [text, jid]
     );
   } else {
     await query(
-      `INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, datetime('now'))`,
+      `INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, NOW())`,
       [jid, text]
     );
   }
 
   if (io) {
-    // Obtener datos del agente para que otros lo puedan mostrar
     let sentByName = null, sentByColor = null;
     if (sentBy) {
       const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
@@ -483,10 +490,11 @@ async function sendMessage(phone, text, sentBy = null) {
       jid,
       content: text,
       timestamp: Date.now(),
+      direction: 'out',
+      type: 'text',
       sent_by: sentBy,
       sent_by_name: sentByName,
       sent_by_color: sentByColor,
-      type: 'text',
     });
   }
 
