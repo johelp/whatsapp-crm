@@ -83,7 +83,12 @@ async function apiFetch(path, opts = {}) {
 // SOCKET.IO
 // ═══════════════════════════════════════════════════════════════
 
-socket.on('wa:status', ({ status, phone }) => updateWAStatus(status, phone));
+socket.on('wa:status', ({ status, phone }) => {
+  updateWAStatus(status, phone);
+  // Cuando conecta, mostrar banner de sincronización
+  if (status === 'open') showSyncBanner();
+});
+
 socket.on('wa:qr', ({ qr }) => {
   updateWAStatus('qr');
   const img = document.getElementById('qr-image');
@@ -127,8 +132,11 @@ socket.on('message:sent', (data) => {
 socket.on('users:online', (users) => renderOnlineAgents(users));
 
 socket.on('history:synced', ({ count }) => {
-  notify(`📥 ${count} mensajes históricos importados desde el móvil`);
+  hideSyncBanner();
+  notify(`📥 ${count} mensajes importados desde WhatsApp`);
   loadConversations();
+  // Si hay conversación activa, recargar sus mensajes
+  if (S.activeJid) loadMessages(S.activeJid);
 });
 
 socket.on('typing:remote', ({ jid, user }) => {
@@ -1061,8 +1069,12 @@ function applyQR(id) {
   const q = S.quickReplies.find(r => r.id === id);
   if (!q) return;
   const conv = S.conversations.find(c => c.jid === S.activeJid);
+  // Nombre: preferir nombre agendado real > push_name de WA > nada (no usar teléfono)
+  const phone = conv?.jid?.split('@')[0] || '';
+  const savedName = conv?.contact_saved_name && conv.contact_saved_name !== phone ? conv.contact_saved_name : null;
+  const nombre = savedName || conv?.wa_push_name || conv?.contact_name !== phone ? conv?.contact_name : '';
   let text = q.content
-    .replace(/\{\{nombre\}\}/gi, conv?.contact_name || '')
+    .replace(/\{\{nombre\}\}/gi, nombre || '')
     .replace(/\{\{empresa\}\}/gi, conv?.company || '')
     .replace(/\{\{extra\}\}/gi, '');
   const input = document.getElementById('msg-input');
@@ -1976,6 +1988,31 @@ function notify(text, type = 'info') {
   setTimeout(() => n.remove(), 4000);
 }
 
+// Banner de sincronización — se muestra mientras Baileys importa el historial
+let _syncBannerTimeout = null;
+function showSyncBanner() {
+  let banner = document.getElementById('sync-banner');
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'sync-banner';
+    banner.innerHTML = `
+      <span class="sync-spinner"></span>
+      <span>Sincronizando historial de WhatsApp... los mensajes aparecerán en breve</span>
+      <button onclick="hideSyncBanner()" style="margin-left:auto;background:none;border:none;color:inherit;cursor:pointer;font-size:16px">✕</button>
+    `;
+    document.body.insertBefore(banner, document.body.firstChild);
+  }
+  banner.style.display = 'flex';
+  // Auto-ocultar después de 3 minutos si no llegó el evento history:synced
+  clearTimeout(_syncBannerTimeout);
+  _syncBannerTimeout = setTimeout(() => hideSyncBanner(), 3 * 60 * 1000);
+}
+function hideSyncBanner() {
+  const banner = document.getElementById('sync-banner');
+  if (banner) banner.style.display = 'none';
+  clearTimeout(_syncBannerTimeout);
+}
+
 function showDesktopNotif(title, body) {
   if (Notification.permission === 'granted') {
     new Notification(`WA CRM — ${title}`, { body: body.substring(0, 100) });
@@ -2116,7 +2153,19 @@ async function loadAIConfig() {
       <div class="field"><label>Delay máx (seg)</label><input class="input" type="number" id="ai-delay-max" value="${cfg.response_delay_max||8}" min="2" max="60"></div>
     </div>
 
-    <button class="btn-primary" onclick="saveAIConfig()" style="margin-bottom:24px">💾 Guardar configuración IA</button>
+    <button class="btn-primary" onclick="saveAIConfig()" style="margin-bottom:16px">💾 Guardar configuración IA</button>
+
+    <!-- PANEL DE TEST DIRECTO -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:24px">
+      <h4 style="margin:0 0 10px 0;font-size:13px">🧪 Probar agente IA ahora mismo</h4>
+      <div style="display:flex;gap:8px;align-items:flex-end">
+        <div class="field" style="flex:1;margin:0">
+          <input class="input" id="ai-test-input" placeholder='Ej: "Hola, ¿cuánto cuesta el servicio grupal?"' style="width:100%">
+        </div>
+        <button class="btn-secondary" onclick="testAIAgent()" style="white-space:nowrap">▶ Probar</button>
+      </div>
+      <div id="ai-test-result" style="margin-top:10px;display:none"></div>
+    </div>
 
     <hr style="border:none;border-top:1px solid var(--border);margin-bottom:20px">
 
@@ -2243,6 +2292,33 @@ async function saveAIConfig() {
     loadAIConfig(); // refrescar pill de estado
   } else {
     notify(res?.error || 'Error guardando', 'error');
+  }
+}
+
+async function testAIAgent() {
+  const input = document.getElementById('ai-test-input');
+  const resultEl = document.getElementById('ai-test-result');
+  const msg = input?.value?.trim();
+  if (!msg) { notify('Escribí un mensaje de prueba', 'warning'); return; }
+
+  resultEl.style.display = 'block';
+  resultEl.innerHTML = `<div style="color:var(--text3);font-size:13px">⏳ Consultando a la IA...</div>`;
+
+  const t0 = Date.now();
+  const res = await apiFetch('/ai/test', { method: 'POST', body: JSON.stringify({ message: msg }) });
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+
+  if (res?.ok) {
+    resultEl.innerHTML = `
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px">
+        <div style="font-size:11px;color:#16a34a;margin-bottom:6px">✅ ${res.provider} / ${res.model} — ${res.elapsed_ms}ms</div>
+        <div style="font-size:13px;color:var(--text1);white-space:pre-wrap">${esc(res.response)}</div>
+      </div>`;
+  } else {
+    resultEl.innerHTML = `
+      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 14px">
+        <div style="font-size:12px;color:#dc2626">❌ Error: ${esc(res?.error || 'Error desconocido')}</div>
+      </div>`;
   }
 }
 

@@ -255,19 +255,27 @@ async function processMessage(msg) {
   let contact = await findContactByPhone(phone);
 
   if (!contact) {
-    // Crear contacto nuevo — usar RETURNING para PostgreSQL
+    // Crear contacto nuevo — nombre solo si hay pushName (no poner el teléfono como nombre)
+    const contactName = msg.pushName || null;
     try {
       const rows = await query(
-        'INSERT INTO contacts (phone, name) VALUES (?, ?) ON CONFLICT (phone) DO UPDATE SET name = COALESCE(contacts.name, EXCLUDED.name) RETURNING id, name, phone',
-        [phone, msg.pushName || phone]
+        `INSERT INTO contacts (phone, name) VALUES (?, ?)
+         ON CONFLICT (phone) DO UPDATE SET
+           name = CASE
+             WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
+             ELSE contacts.name
+           END
+         RETURNING id, name, phone`,
+        [phone, contactName]
       );
       contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
     } catch (e) {
       // Fallback SQLite
-      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName || phone]);
+      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
       contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
     }
-  } else if (!contact.name && msg.pushName) {
+  } else if (msg.pushName && (!contact.name || contact.name === phone || contact.name === contact.phone)) {
+    // Actualizar nombre si: era null, o era igual al teléfono (fallback anterior)
     await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
     contact.name = msg.pushName;
   }
@@ -406,19 +414,29 @@ async function connect() {
         const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
         if (exists) continue;
 
-        // Upsert contacto
+        // Upsert contacto — no usar teléfono como nombre
         let contact = await findContactByPhone(phone);
         if (!contact) {
+          const contactName = msg.pushName || null;
           try {
             const rows = await query(
-              'INSERT INTO contacts (phone, name) VALUES (?, ?) ON CONFLICT (phone) DO UPDATE SET name = COALESCE(contacts.name, EXCLUDED.name) RETURNING id, name',
-              [phone, msg.pushName || phone]
+              `INSERT INTO contacts (phone, name) VALUES (?, ?)
+               ON CONFLICT (phone) DO UPDATE SET
+                 name = CASE
+                   WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
+                   ELSE contacts.name
+                 END
+               RETURNING id, name`,
+              [phone, contactName]
             );
             contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
           } catch (e) {
-            await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName || phone]);
+            await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
             contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
           }
+        } else if (msg.pushName && (!contact.name || contact.name === phone)) {
+          await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
+          contact.name = msg.pushName;
         }
 
         await saveMessage({ message_id: msg.key.id, jid, direction, type, content: text, timestamp, is_auto_reply: 0, sent_by: null });

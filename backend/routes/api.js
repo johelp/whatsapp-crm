@@ -225,15 +225,20 @@ router.delete('/labels/:id', requireAuth, requireAdmin, async (req, res) => {
 router.get('/conversations', requireAuth, async (req, res) => {
   const { status, assigned, search } = req.query;
 
-  // Extraer teléfono del JID: "5491123456789@s.whatsapp.net" → "5491123456789"
   const phoneFromJid = USE_PG
     ? `SPLIT_PART(cv.jid, '@', 1)`
     : `SUBSTR(cv.jid, 1, INSTR(cv.jid, '@') - 1)`;
 
+  // Prioridad de nombre: 1) nombre agendado (si no es igual al teléfono) 2) push_name de WA 3) nombre agendado igual al tel 4) teléfono del JID
+  const displayName = USE_PG
+    ? `COALESCE(NULLIF(c.name, ${phoneFromJid}), cv.wa_push_name, c.name, ${phoneFromJid})`
+    : `COALESCE(CASE WHEN c.name != ${phoneFromJid} THEN c.name ELSE NULL END, cv.wa_push_name, c.name, ${phoneFromJid})`;
+
   let sql = `
     SELECT cv.*,
-      COALESCE(c.name, cv.wa_push_name) as contact_name,
-      COALESCE(c.phone) as contact_phone,
+      ${displayName} as contact_name,
+      COALESCE(c.phone, ${phoneFromJid}) as contact_phone,
+      c.name as contact_saved_name,
       c.company as company,
       u.display_name as assigned_name, u.color as assigned_color
     FROM conversations cv
@@ -245,8 +250,12 @@ router.get('/conversations', requireAuth, async (req, res) => {
   if (status && status !== 'all') { sql += ' AND cv.status = ?'; params.push(status); }
   if (assigned === 'me') { sql += ' AND cv.assigned_to = ?'; params.push(req.session.user.id); }
   if (search) {
-    sql += ' AND (c.name LIKE ? OR c.phone LIKE ? OR cv.last_message LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+    if (USE_PG) {
+      sql += ` AND (c.name ILIKE ? OR c.phone LIKE ? OR cv.wa_push_name ILIKE ? OR cv.last_message ILIKE ? OR ${phoneFromJid} LIKE ?)`;
+    } else {
+      sql += ` AND (c.name LIKE ? OR c.phone LIKE ? OR cv.wa_push_name LIKE ? OR cv.last_message LIKE ? OR ${phoneFromJid} LIKE ?)`;
+    }
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
   sql += ' ORDER BY cv.last_message_at DESC LIMIT 200';
 
@@ -256,20 +265,14 @@ router.get('/conversations', requireAuth, async (req, res) => {
       const labels = await query(`
         SELECT l.id, l.name, l.color FROM conversation_labels cvl
         JOIN labels l ON cvl.label_id = l.id WHERE cvl.conversation_id = ?`, [row.id]);
-      // Si no hay nombre en CRM, usar el número como fallback
-      if (!row.contact_name) {
-        row.contact_name = row.jid.split('@')[0];
-      }
+      if (!row.contact_name) row.contact_name = row.jid.split('@')[0];
       return { ...row, labels };
     }));
     res.json(result);
   } catch (e) {
     console.error('Error en GET /conversations:', e.message);
-    // Fallback: query mínima sin JOINs complejos
     try {
-      const rows = await query(
-        `SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200`
-      );
+      const rows = await query(`SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200`);
       res.json(rows.map(r => ({ ...r, labels: [], contact_name: r.wa_push_name || r.jid.split('@')[0] })));
     } catch (e2) {
       res.status(500).json({ error: e2.message });
@@ -631,6 +634,72 @@ router.get('/ai-config', requireAuth, requireAdmin, async (req, res) => {
   res.json(cfg);
 });
 
+// Test directo del agente IA — envía un mensaje de prueba y devuelve la respuesta
+router.post('/ai/test', requireAuth, requireAdmin, async (req, res) => {
+  const { message } = req.body;
+  if (!message) return res.status(400).json({ error: 'Falta el mensaje de prueba' });
+
+  const { getAIConfig } = require('../ai-agent');
+
+  // Obtener config con la API key completa (sin sanitizar)
+  const config = await queryOne('SELECT * FROM ai_config LIMIT 1');
+  if (!config?.is_active) return res.status(400).json({ error: 'El agente IA no está activo' });
+  if (!config?.api_key) return res.status(400).json({ error: 'No hay API key configurada' });
+
+  const { getDocumentContext } = require('../ai-agent');
+
+  try {
+    const systemLines = [
+      `Sos el asistente virtual de ${config.company_name || 'la empresa'}.`,
+      'Respondés mensajes de WhatsApp de forma amigable, clara y concisa.',
+      'Nunca uses markdown ni asteriscos.',
+    ];
+    if (config.company_context?.trim()) systemLines.push('\n' + config.company_context.trim());
+    if (config.system_prompt?.trim()) systemLines.push('\n' + config.system_prompt.trim());
+    const systemPrompt = systemLines.join('\n');
+
+    const history = [{ role: 'user', content: message }];
+
+    let response = null;
+    const t0 = Date.now();
+
+    if (config.provider === 'gemini') {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-1.5-flash'}:generateContent?key=${config.api_key}`;
+      const r = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: 'user', parts: [{ text: message }] }],
+          generationConfig: { maxOutputTokens: config.max_tokens || 300, temperature: config.temperature ?? 0.7 },
+        }),
+      });
+      if (!r.ok) {
+        const errText = await r.text();
+        return res.status(400).json({ error: `Gemini ${r.status}: ${errText.substring(0,300)}` });
+      }
+      const d = await r.json();
+      response = d.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+    } else if (config.provider === 'groq') {
+      const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.api_key}` },
+        body: JSON.stringify({ model: config.model || 'llama3-8b-8192', messages: [{ role: 'system', content: systemPrompt }, ...history], max_tokens: config.max_tokens || 300 }),
+      });
+      if (!r.ok) return res.status(400).json({ error: `Groq ${r.status}: ${(await r.text()).substring(0,300)}` });
+      const d = await r.json();
+      response = d.choices?.[0]?.message?.content?.trim() || null;
+    } else {
+      return res.status(400).json({ error: `Proveedor ${config.provider} no soportado en test directo` });
+    }
+
+    const elapsed = Date.now() - t0;
+    res.json({ ok: true, response, provider: config.provider, model: config.model, elapsed_ms: elapsed });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 router.put('/ai-config', requireAuth, requireAdmin, async (req, res) => {
   const {
     is_active, provider, api_key, model, system_prompt,
@@ -822,6 +891,13 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `UPDATE users SET is_active = 1 WHERE is_active IS NULL`,
     // Asegurar que conversations tiene columnas de timestamps
     `UPDATE conversations SET last_message_at = NOW() WHERE last_message_at IS NULL AND last_message IS NOT NULL`,
+    // Limpiar nombres de contactos que son iguales al teléfono (fallback anterior incorrecto)
+    // Los setea a NULL para que la UI muestre el push_name de WA
+    `UPDATE contacts SET name = NULL WHERE name = phone AND phone IS NOT NULL`,
+    // Poblar wa_push_name en conversaciones desde contactos que sí tenían push_name
+    `UPDATE conversations SET wa_push_name = (
+      SELECT c.name FROM contacts c WHERE c.id = conversations.contact_id AND c.name IS NOT NULL
+    ) WHERE wa_push_name IS NULL AND contact_id IS NOT NULL`,
   ];
 
   for (const sql of ops) {
