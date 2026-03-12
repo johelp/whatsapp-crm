@@ -467,43 +467,59 @@ async function sendMessage(phone, text, sentBy = null) {
     throw new Error('WhatsApp no está conectado');
   }
 
-  // Resolver el JID correcto — algunos contactos usan @lid en vez de @s.whatsapp.net
-  let jid = normalizeJid(phone);
+  // JID base normalizado (el que tenemos en nuestra DB)
+  const baseJid = normalizeJid(phone);
+
+  // Resolver el JID real de WhatsApp — puede diferir del nuestro (Business ID, @lid, etc.)
+  let sendJid = baseJid;
   try {
-    const [result] = await sock.onWhatsApp(jid);
+    const [result] = await sock.onWhatsApp(baseJid);
     if (result?.exists && result?.jid) {
-      jid = result.jid; // usar el JID real que devuelve WA (puede ser @lid)
+      sendJid = result.jid; // JID real para el envío
     }
   } catch(e) {
     // Si onWhatsApp falla, seguir con el JID normalizado
   }
 
-  await sock.presenceSubscribe(jid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', jid);
+  await sock.presenceSubscribe(sendJid).catch(() => {});
+  await sock.sendPresenceUpdate('composing', sendJid);
   const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
   await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', jid);
+  await sock.sendPresenceUpdate('paused', sendJid);
 
-  const sent = await sock.sendMessage(jid, { text });
+  const sent = await sock.sendMessage(sendJid, { text });
+
+  // Para guardar en DB siempre usar el JID que tenemos en conversaciones (baseJid)
+  // Si el JID de envío difiere, buscar la conv por el JID base
+  // Esto evita crear conversaciones duplicadas con JIDs raros de WhatsApp Business
+  const convJid = baseJid;
 
   await saveMessage({
     message_id: sent.key.id,
-    jid, direction: 'out', type: 'text',
+    jid: convJid, direction: 'out', type: 'text',
     content: text, timestamp: Date.now(),
     is_auto_reply: 0, sent_by: sentBy,
   });
 
-  const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
+  const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [convJid]);
   if (existing) {
     await query(
       `UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`,
-      [text, jid]
+      [text, convJid]
     );
   } else {
-    await query(
-      `INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, NOW())`,
-      [jid, text]
+    // Intentar encontrar la conversación por variantes del número
+    const phoneOnly = phone.replace(/\D/g,'');
+    const altConv = await queryOne(
+      `SELECT jid FROM conversations WHERE jid LIKE ? OR jid LIKE ?`,
+      [`%${phoneOnly}%`, `%${normalizePhone(phoneOnly)}%`]
     );
+    const targetJid = altConv?.jid || convJid;
+    await query(
+      `INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, NOW())
+       ON CONFLICT (jid) DO UPDATE SET last_message = EXCLUDED.last_message, last_message_at = NOW()`,
+      [targetJid, text]
+    ).catch(() => {});
   }
 
   if (io) {
@@ -514,7 +530,7 @@ async function sendMessage(phone, text, sentBy = null) {
       sentByColor = user?.color || null;
     }
     io.emit('message:sent', {
-      jid,
+      jid: convJid,
       content: text,
       timestamp: Date.now(),
       direction: 'out',

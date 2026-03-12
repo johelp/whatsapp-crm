@@ -898,6 +898,15 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `UPDATE conversations SET wa_push_name = (
       SELECT c.name FROM contacts c WHERE c.id = conversations.contact_id AND c.name IS NOT NULL
     ) WHERE wa_push_name IS NULL AND contact_id IS NOT NULL`,
+    // Eliminar conversaciones "fantasma" creadas por JIDs raros de onWhatsApp()
+    // Son conversaciones sin mensajes propios y sin last_message real, con JIDs numéricos raros
+    // (ej: 889058291715 — 12 dígitos, no corresponde a ningún código de país válido)
+    `DELETE FROM conversations WHERE
+      id NOT IN (SELECT DISTINCT conversation_id FROM conversation_labels WHERE conversation_id IS NOT NULL)
+      AND last_message IS NULL
+      AND unread_count = 0
+      AND contact_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.jid = conversations.jid)`,
   ];
 
   for (const sql of ops) {

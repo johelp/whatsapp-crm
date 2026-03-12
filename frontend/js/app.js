@@ -2068,13 +2068,13 @@ async function loadAIConfig() {
 
   const MODELS = {
     gemini:    ['gemini-1.5-flash (gratis)', 'gemini-1.5-pro', 'gemini-2.0-flash'],
-    groq: ['llama-3.1-8b-instant', 'llama-3.1-70b-versatile'],
+    groq:      ['llama3-8b-8192 (gratis)', 'llama3-70b-8192 (gratis)', 'mixtral-8x7b-32768 (gratis)'],
     openai:    ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'],
     anthropic: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'],
   };
   const MODEL_VALUES = {
     gemini:    ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'],
-groq: ['llama-3.1-8b-instant', 'llama-3.1-70b-versatile'],
+    groq:      ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768'],
     openai:    ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'],
     anthropic: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'],
   };
