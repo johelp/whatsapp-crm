@@ -7,6 +7,7 @@ const path = require('path');
 const fs = require('fs');
 const qrcode = require('qrcode');
 const { query, queryOne } = require('./db');
+const { runAIAgent } = require('./ai-agent');
 
 // Baileys se importa dinámicamente en connect() por ser ESM puro
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType;
@@ -205,24 +206,25 @@ async function upsertConversationHistory(jid, contactId, lastMessage, lastMessag
   }
 }
 
-async function upsertConversation(jid, contactId, lastMessage, lastMessageAt) {
+async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pushName = null) {
   const existing = await queryOne('SELECT id, unread_count FROM conversations WHERE jid = ?', [jid]);
   if (existing) {
     await query(
       `UPDATE conversations SET
         contact_id = COALESCE(?, contact_id),
+        wa_push_name = COALESCE(wa_push_name, ?),
         last_message = ?,
         last_message_at = ?,
         unread_count = unread_count + 1,
         updated_at = datetime('now')
        WHERE jid = ?`,
-      [contactId || null, lastMessage, lastMessageAt, jid]
+      [contactId || null, pushName, lastMessage, lastMessageAt, jid]
     );
   } else {
     await query(
-      `INSERT INTO conversations (jid, contact_id, last_message, last_message_at, unread_count)
-       VALUES (?, ?, ?, ?, 1)`,
-      [jid, contactId || null, lastMessage, lastMessageAt]
+      `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count)
+       VALUES (?, ?, ?, ?, ?, 1)`,
+      [jid, contactId || null, pushName, lastMessage, lastMessageAt]
     );
   }
 }
@@ -277,7 +279,7 @@ async function processMessage(msg) {
   });
 
   // Upsert conversación
-  await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString());
+  await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString(), msg.pushName || null);
 
   const conv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [jid]);
 
@@ -285,6 +287,13 @@ async function processMessage(msg) {
     console.error('Error en auto-reply:', e.message);
     return false;
   });
+
+  // Si el auto-reply no manejó el mensaje, intentar con el agente IA
+  if (!autoHandled) {
+    runAIAgent(jid, text, sendMessage).catch(e => {
+      console.error('Error en agente IA:', e.message);
+    });
+  }
 
   if (io) {
     const convFull = await queryOne(`

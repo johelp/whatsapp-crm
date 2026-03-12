@@ -1461,3 +1461,86 @@ textarea.input { resize: vertical; line-height: 1.5; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+
+/* ══════════════════════════════════════════════════════════════
+   LABEL FILTER DROPDOWN
+══════════════════════════════════════════════════════════════ */
+
+.label-filter-wrap { margin-top: 4px; }
+
+.label-filter-sel {
+  width: 100%;
+  padding: 5px 10px;
+  font-size: 11px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface2);
+  color: var(--text2);
+  font-family: 'Sora', sans-serif;
+  cursor: pointer;
+  outline: none;
+}
+
+.label-filter-sel:focus { border-color: var(--wa); }
+
+/* ══════════════════════════════════════════════════════════════
+   RESPONSIVE — pantallas pequeñas
+══════════════════════════════════════════════════════════════ */
+
+@media (max-width: 900px) {
+  :root {
+    --sidebar-w: 52px;
+    --chat-list-w: 260px;
+  }
+
+  .nav-label { display: none; }
+  .nav-item { justify-content: center; padding: 10px; }
+  .sidebar-logo span { display: none; }
+  .sidebar-logo { justify-content: center; }
+
+  .chat-header-actions {
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .status-select { font-size: 11px; padding: 4px 6px; max-width: 100px; }
+
+  .ch-name { font-size: 13px; }
+  .ch-meta { font-size: 11px; }
+
+  .info-sidebar { display: none !important; }
+
+  .panel-topbar { flex-wrap: wrap; gap: 8px; }
+}
+
+@media (max-width: 680px) {
+  :root { --chat-list-w: 0px; }
+
+  .chat-list-col {
+    position: absolute;
+    width: 100vw;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 10;
+    background: var(--surface);
+    transition: transform 0.2s;
+  }
+
+  .chat-list-col.hidden { transform: translateX(-100%); }
+
+  .chat-view { width: 100vw; }
+
+  .header-filters { flex-wrap: wrap; }
+
+  .modal { padding: 16px; }
+  .modal-lg { max-width: 98vw; }
+
+  .form-row-2 { grid-template-columns: 1fr; }
+
+  .camps-grid { grid-template-columns: 1fr !important; }
+}
+
+/* Prevenir autocomplete visual en buscadores */
+.search-input::-webkit-contacts-auto-fill-button,
+.search-input::-webkit-credentials-auto-fill-button { display: none !important; }

@@ -184,6 +184,7 @@ async function createTables() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       jid TEXT UNIQUE NOT NULL,
       contact_id INTEGER,
+      wa_push_name TEXT,
       status TEXT DEFAULT 'open',
       assigned_to INTEGER,
       unread_count INTEGER DEFAULT 0,
@@ -280,6 +281,25 @@ async function createTables() {
       uploaded_by INTEGER,
       use_count INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS ai_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      is_active INTEGER DEFAULT 0,
+      provider TEXT DEFAULT 'openai',
+      api_key TEXT,
+      model TEXT DEFAULT 'gpt-4o-mini',
+      system_prompt TEXT,
+      company_name TEXT,
+      company_context TEXT,
+      response_delay_min INTEGER DEFAULT 3,
+      response_delay_max INTEGER DEFAULT 8,
+      max_tokens INTEGER DEFAULT 300,
+      temperature REAL DEFAULT 0.7,
+      only_outside_hours INTEGER DEFAULT 1,
+      working_hours_start TEXT DEFAULT '09:00',
+      working_hours_end TEXT DEFAULT '18:00',
+      working_days TEXT DEFAULT '1,2,3,4,5',
+      updated_at TEXT DEFAULT (datetime('now'))
     )`,
   ];
 

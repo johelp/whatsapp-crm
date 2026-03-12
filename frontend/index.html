@@ -81,9 +81,13 @@
         </div>
         <div class="search-wrap">
           <span class="search-icon">🔍</span>
-          <input class="search-input" id="chat-search" placeholder="Buscar..." oninput="filterConversations()">
+          <input class="search-input" id="chat-search" placeholder="Buscar..." autocomplete="off" oninput="filterConversations()">
         </div>
-        <div class="label-chips" id="label-chips"></div>
+        <div class="label-filter-wrap">
+          <select class="input label-filter-sel" id="label-filter-sel" onchange="setLabelFromSelect(this)">
+            <option value="">🏷 Todas las etiquetas</option>
+          </select>
+        </div>
       </div>
       <div class="chat-list" id="chat-list">
         <div class="list-empty">Cargando...</div>

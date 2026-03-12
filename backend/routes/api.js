@@ -229,7 +229,7 @@ router.get('/conversations', requireAuth, async (req, res) => {
 
   let sql = `
     SELECT cv.*,
-      COALESCE(c.name, c2.name) as contact_name,
+      COALESCE(c.name, c2.name, cv.wa_push_name) as contact_name,
       COALESCE(c.phone, c2.phone) as contact_phone,
       COALESCE(c.company, c2.company) as company,
       u.display_name as assigned_name, u.color as assigned_color
@@ -596,6 +596,59 @@ router.get('/files/:id/download', requireAuth, async (req, res) => {
   res.setHeader('Content-Type', file.mime_type);
   res.setHeader('Content-Disposition', `inline; filename="${file.original_name}"`);
   fs.createReadStream(filePath).pipe(res);
+});
+
+// ─── AI Config ────────────────────────────────────────────────────────────────
+
+router.get('/ai-config', requireAuth, requireAdmin, async (req, res) => {
+  const cfg = await queryOne('SELECT * FROM ai_config LIMIT 1') || {};
+  // No devolver la API key completa — solo indicar si está cargada
+  if (cfg.api_key) cfg.api_key_set = true;
+  delete cfg.api_key;
+  res.json(cfg);
+});
+
+router.put('/ai-config', requireAuth, requireAdmin, async (req, res) => {
+  const {
+    is_active, provider, api_key, model, system_prompt,
+    company_name, company_context, response_delay_min, response_delay_max,
+    max_tokens, temperature, only_outside_hours,
+    working_hours_start, working_hours_end, working_days,
+  } = req.body;
+
+  const existing = await queryOne('SELECT id FROM ai_config LIMIT 1');
+  if (existing) {
+    // Solo actualizar api_key si se envió una nueva (no vacía)
+    const keyClause = api_key ? ', api_key = ?' : '';
+    const keyParam  = api_key ? [api_key] : [];
+    await query(
+      `UPDATE ai_config SET
+        is_active=?, provider=?, model=?, system_prompt=?, company_name=?,
+        company_context=?, response_delay_min=?, response_delay_max=?,
+        max_tokens=?, temperature=?, only_outside_hours=?,
+        working_hours_start=?, working_hours_end=?, working_days=?,
+        updated_at=datetime('now') ${keyClause}
+       WHERE id=1`,
+      [is_active?1:0, provider, model, system_prompt, company_name,
+       company_context, response_delay_min||3, response_delay_max||8,
+       max_tokens||300, temperature||0.7, only_outside_hours?1:0,
+       working_hours_start, working_hours_end, working_days||'1,2,3,4,5',
+       ...keyParam]
+    );
+  } else {
+    await query(
+      `INSERT INTO ai_config
+        (is_active, provider, api_key, model, system_prompt, company_name,
+         company_context, response_delay_min, response_delay_max, max_tokens,
+         temperature, only_outside_hours, working_hours_start, working_hours_end, working_days)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [is_active?1:0, provider, api_key||'', model, system_prompt||'', company_name||'',
+       company_context||'', response_delay_min||3, response_delay_max||8,
+       max_tokens||300, temperature||0.7, only_outside_hours?1:0,
+       working_hours_start||'09:00', working_hours_end||'18:00', working_days||'1,2,3,4,5']
+    );
+  }
+  res.json({ ok: true });
 });
 
 module.exports = router;
