@@ -51,17 +51,22 @@ function startAutoSave() {
 async function query(sql, params = []) {
   if (USE_PG) {
     let i = 0;
-    const pgSql = sql
+    let pgSql = sql
       .replace(/\?/g, () => `$${++i}`)
-      .replace(/ON CONFLICT\s*\(([^)]+)\)\s*DO NOTHING/gi, 'ON CONFLICT ($1) DO NOTHING')
-      .replace(/ON CONFLICT DO NOTHING/gi, 'ON CONFLICT DO NOTHING')
-      .replace(/INSERT OR IGNORE/gi, 'INSERT')
-      .replace(/ON CONFLICT\s*\(([^)]+)\)\s*DO UPDATE SET/gi, 'ON CONFLICT ($1) DO UPDATE SET')
       .replace(/AUTOINCREMENT/gi, '')
       .replace(/datetime\s*\(\s*'now'\s*\)/gi, 'NOW()')
       .replace(/datetime\s*\(\s*"now"\s*\)/gi, 'NOW()')
-      .replace(/DEFAULT\s+\(datetime\s*\(\s*'now'\s*\)\)/gi, "DEFAULT NOW()")
+      .replace(/DEFAULT\s+\(datetime\s*\(\s*'now'\s*\)\)/gi, 'DEFAULT NOW()')
       .replace(/strftime\s*\([^)]+\)/gi, 'NOW()');
+
+    // INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
+    if (/INSERT\s+OR\s+IGNORE\s+INTO/i.test(pgSql)) {
+      pgSql = pgSql.replace(/INSERT\s+OR\s+IGNORE\s+INTO/i, 'INSERT INTO');
+      if (!/ON\s+CONFLICT/i.test(pgSql)) {
+        pgSql = pgSql.trimEnd().replace(/;?\s*$/, '') + ' ON CONFLICT DO NOTHING';
+      }
+    }
+
     const result = await pgPool.query(pgSql, params);
     return result.rows;
   }
@@ -371,13 +376,15 @@ async function seedData() {
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 
 async function runMigrations() {
-  if (!USE_PG) return; // SQLite se recrea siempre con schema nuevo
+  if (!USE_PG) return;
   const migrations = [
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
+    // Asegurar que message_id tiene un índice único para ON CONFLICT funcione
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
   ];
   for (const sql of migrations) {
-    try { await query(sql); } catch(e) { /* columna ya existe, ignorar */ }
+    try { await query(sql); } catch(e) { console.log('Migration skip:', e.message.substring(0,60)); }
   }
   console.log('Migraciones aplicadas');
 }

@@ -179,11 +179,14 @@ async function runAutoReplyBot(jid, incomingText, conv) {
 async function saveMessage({ message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by }) {
   try {
     await query(
-      `INSERT OR IGNORE INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [message_id, jid, direction, type, content, timestamp, is_auto_reply ? 1 : 0, sent_by || null]
+      `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (message_id) DO NOTHING`,
+      [message_id, jid, direction, type, content || '', timestamp, is_auto_reply ? 1 : 0, sent_by || null]
     );
-  } catch(e) { /* mensaje duplicado, ignorar */ }
+  } catch(e) {
+    console.error('[saveMessage] Error:', e.message, '| jid:', jid, '| msg_id:', message_id);
+  }
 }
 
 async function upsertConversationHistory(jid, contactId, lastMessage, lastMessageAt, direction) {
