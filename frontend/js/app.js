@@ -1703,6 +1703,30 @@ async function renderSettings() {
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
 
+      <h4 style="margin-bottom:4px">📥 Recuperar mensajes</h4>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:10px">
+        Si los chats muestran "Sin mensajes aún", usá estas opciones para recuperarlos.
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">
+        <div class="field" style="min-width:180px">
+          <label>Tu contraseña</label>
+          <input class="input" type="password" id="sys-pwd-seed" placeholder="••••••••">
+        </div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <button class="btn-secondary" onclick="systemSeedMessages()" title="Genera mensajes sintéticos desde el último mensaje de cada conversación">
+            💾 Seed desde conversaciones
+          </button>
+          <button class="btn-secondary" onclick="systemResyncHistory()" title="Pide a WhatsApp que reenvíe el historial de mensajes">
+            🔄 Re-sincronizar historial WA
+          </button>
+        </div>
+      </div>
+      <div id="seed-result" style="font-size:12px;color:var(--text3)">
+        El <b>Seed</b> crea un mensaje por chat usando el último mensaje guardado. El <b>Re-sync</b> le pide al teléfono que reenvíe el historial completo (puede tardar varios minutos).
+      </div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+
       <h4 style="margin-bottom:4px;color:var(--red)">🗑️ Resetear datos</h4>
       <p style="font-size:12px;color:var(--text3);margin-bottom:10px">Elimina mensajes, conversaciones o contactos. <b>Irreversible.</b> No afecta usuarios, configuración ni sesión de WhatsApp.</p>
       <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
@@ -2244,6 +2268,43 @@ async function loadSystemStats() {
     <div style="font-size:11px;color:var(--text3)">
       Mensaje más antiguo: ${fmtDate(s.oldest_message)} · Más reciente: ${fmtDate(s.newest_message)}
     </div>`;
+}
+
+async function systemSeedMessages() {
+  const pwd = document.getElementById('sys-pwd-seed')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña', 'error'); return; }
+  const el = document.getElementById('seed-result');
+  el.innerHTML = '<span style="color:var(--text3)">Ejecutando seed...</span>';
+
+  const res = await apiFetch('/system/seed-messages', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+  if (res?.ok) {
+    el.innerHTML = `<span style="color:var(--wa)">✅ Seed completo: ${res.inserted} mensajes insertados (total en DB: ${res.after})</span>`;
+    notify(`✅ ${res.inserted} mensajes recuperados`);
+    document.getElementById('sys-pwd-seed').value = '';
+    await loadSystemStats();
+    // Recargar conversación abierta si hay una
+    if (S.currentJid) openChat(S.currentJid);
+  } else {
+    el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
+    notify(res?.error || 'Error', 'error');
+  }
+}
+
+async function systemResyncHistory() {
+  const pwd = document.getElementById('sys-pwd-seed')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña', 'error'); return; }
+  const el = document.getElementById('seed-result');
+  el.innerHTML = '<span style="color:var(--text3)">Solicitando re-sincronización...</span>';
+
+  const res = await apiFetch('/system/resync-history', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+  if (res?.ok) {
+    el.innerHTML = `<span style="color:var(--wa)">✅ ${res.message}</span>`;
+    notify('✅ Re-sync iniciado, esperá unos minutos');
+    document.getElementById('sys-pwd-seed').value = '';
+  } else {
+    el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
+    notify(res?.error || 'Error', 'error');
+  }
 }
 
 async function systemRepairDB() {

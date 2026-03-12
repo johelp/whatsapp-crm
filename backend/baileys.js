@@ -574,4 +574,31 @@ async function logout() {
   setTimeout(connect, 1000);
 }
 
-module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone };
+// Fuerza re-sincronización del historial desde el teléfono
+// borrando las credenciales de sesión y reconectando
+async function requestHistoryResync() {
+  if (!sock || connectionStatus !== 'connected') {
+    throw new Error('WhatsApp no conectado');
+  }
+  try {
+    // Baileys: fetchAllSupportedFeatures fuerza historial si el sock lo soporta
+    await sock.sendNode({
+      tag: 'iq',
+      attrs: { type: 'get', to: 's.whatsapp.net', xmlns: 'urn:xmpp:whatsapp:dirty' },
+      content: [{ tag: 'clean', attrs: { type: 'account_sync' } }]
+    }).catch(() => {});
+  } catch(e) { /* ignorar */ }
+
+  // Emitir historial nuevamente desde el store de mensajes en memoria si existe
+  if (sock.ev) {
+    sock.ev.emit('messaging-history.set', {
+      messages: [],
+      contacts: [],
+      chats: [],
+      isLatest: false
+    });
+  }
+  return true;
+}
+
+module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };

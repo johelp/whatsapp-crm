@@ -1,833 +1,604 @@
 /**
- * routes/api.js — Todas las rutas REST
+ * baileys.js — Conexion WhatsApp con Baileys
+ * Usa dynamic import() para compatibilidad con Node 18/20/22 (ESM)
  */
-const express = require('express');
-const router = express.Router();
-const bcrypt = require('bcryptjs');
-const multer = require('multer');
-const csvParser = require('csv-parser');
-const fs = require('fs');
+const pino = require('pino');
 const path = require('path');
-const os = require('os');
+const fs = require('fs');
+const qrcode = require('qrcode');
+const { query, queryOne } = require('./db');
+const { runAIAgent } = require('./ai-agent');
 
-const { query, queryOne, USE_PG } = require('../db');
-const { sendMessage, sendFile, getStatus, logout, normalizePhone } = require('../baileys');
-const { runCampaign, isRunning, requestCancel } = require('../sender');
-const { requireAuth, requireAdmin } = require('../middleware/auth');
+// Baileys se importa dinámicamente en connect() por ser ESM puro
+let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType;
 
-// Carpeta de archivos de biblioteca
-const FILES_DIR = path.join(__dirname, '../../data/files');
-if (!fs.existsSync(FILES_DIR)) fs.mkdirSync(FILES_DIR, { recursive: true });
+const AUTH_PATH = process.env.WA_AUTH_PATH
+  ? path.resolve(process.env.WA_AUTH_PATH)
+  : path.join(__dirname, '../auth');
 
-// Multer: CSV uploads al temp
-const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 5 * 1024 * 1024 } });
+if (!fs.existsSync(AUTH_PATH)) fs.mkdirSync(AUTH_PATH, { recursive: true });
 
-// Multer: biblioteca de archivos (hasta 20MB, guardados en data/files)
-const fileUpload = multer({
-  storage: multer.diskStorage({
-    destination: FILES_DIR,
-    filename: (req, file, cb) => {
-      const unique = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const ext = path.extname(file.originalname);
-      cb(null, `${unique}${ext}`);
-    },
-  }),
-  limits: { fileSize: 20 * 1024 * 1024 },
-});
+let sock = null;
+let io = null;
+let qrData = null;
+let connectionStatus = 'disconnected';
+let reconnectTimer = null;
 
-// ─── WhatsApp ─────────────────────────────────────────────────────────────────
+function setIO(socketIO) { io = socketIO; }
+function getStatus() { return { status: connectionStatus, qr: qrData }; }
+function getSock() { return sock; }
 
-router.get('/wa/status', (req, res) => res.json(getStatus()));
+// ─── Normalización de números ─────────────────────────────────────────────────
+// WhatsApp Argentina: algunos números llegan con 549... otros con 54...
+// Normalizamos siempre a 549XXXXXXXXXX para celulares argentinos
 
-router.post('/wa/logout', requireAuth, requireAdmin, async (req, res) => {
-  await logout();
-  res.json({ ok: true });
-});
+function normalizePhone(raw) {
+  let p = String(raw).replace(/\D/g, '');
 
-// ─── Auth ─────────────────────────────────────────────────────────────────────
+  // Quitar prefijo de JID si viene con @
+  p = p.split('@')[0];
 
-router.post('/auth/login', async (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'Faltan credenciales' });
-  const user = await queryOne('SELECT * FROM users WHERE username = ? AND is_active = 1', [username]);
-  if (!user) return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
-  const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
-  req.session.user = { id: user.id, username: user.username, display_name: user.display_name, role: user.role, color: user.color };
-  await query('UPDATE users SET last_seen = datetime(\'now\') WHERE id = ?', [user.id]);
-  res.json({ ok: true, user: req.session.user });
-});
-
-router.post('/auth/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ ok: true });
-});
-
-router.get('/auth/me', (req, res) => {
-  if (!req.session?.user) return res.status(401).json({ error: 'No autenticado' });
-  res.json(req.session.user);
-});
-
-// ─── Users ────────────────────────────────────────────────────────────────────
-
-router.get('/users', requireAuth, requireAdmin, async (req, res) => {
-  res.json(await query('SELECT id, username, display_name, role, color, is_active, last_seen FROM users ORDER BY display_name'));
-});
-
-router.post('/users', requireAuth, requireAdmin, async (req, res) => {
-  const { username, display_name, password, role, color } = req.body;
-  if (!username || !password) return res.status(400).json({ error: 'username y password requeridos' });
-  const hash = await bcrypt.hash(password, 10);
-  const rows = await query(
-    'INSERT INTO users (username, display_name, password_hash, role, color) VALUES (?, ?, ?, ?, ?)',
-    [username, display_name || username, hash, role || 'agent', color || '#6366f1']
-  );
-  res.json({ id: rows[0]?.lastInsertRowid, ok: true });
-});
-
-router.put('/users/:id', requireAuth, requireAdmin, async (req, res) => {
-  const { display_name, role, color, is_active, password } = req.body;
-  if (parseInt(req.params.id) === req.session.user.id && is_active === 0) {
-    return res.status(400).json({ error: 'No podés desactivarte a vos mismo' });
+  // Argentina: si empieza con 54 y el siguiente dígito NO es 9, insertar 9
+  // Ej: 5411XXXXXXXX -> 54911XXXXXXXX
+  // Ej: 5491XXXXXXXX -> 5491XXXXXXXX (ya correcto)
+  if (p.startsWith('54') && p.length >= 10) {
+    const sinPrefijo = p.slice(2);
+    if (!sinPrefijo.startsWith('9')) {
+      p = '549' + sinPrefijo;
+    }
   }
-  if (password) {
-    const hash = await bcrypt.hash(password, 10);
-    await query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, req.params.id]);
-  }
-  await query('UPDATE users SET display_name = ?, role = ?, color = ?, is_active = ? WHERE id = ?',
-    [display_name, role, color, is_active != null ? (is_active ? 1 : 0) : 1, req.params.id]);
-  res.json({ ok: true });
-});
 
-router.delete('/users/:id', requireAuth, requireAdmin, async (req, res) => {
-  if (parseInt(req.params.id) === req.session.user.id) return res.status(400).json({ error: 'No podés eliminarte a vos mismo' });
-  await query('UPDATE users SET is_active = 0 WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-});
+  return p;
+}
 
-// ─── Contacts ─────────────────────────────────────────────────────────────────
+function normalizeJid(phone) {
+  return `${normalizePhone(phone)}@s.whatsapp.net`;
+}
 
-router.get('/contacts', requireAuth, async (req, res) => {
-  const rows = await query('SELECT * FROM contacts ORDER BY name');
-  const result = await Promise.all(rows.map(async (row) => {
-    const labels = await query(`
-      SELECT l.id, l.name, l.color FROM contact_labels cl
-      JOIN labels l ON cl.label_id = l.id WHERE cl.contact_id = ?`, [row.id]);
-    return { ...row, labels };
-  }));
-  res.json(result);
-});
+function extractPhone(jid) {
+  return jid.split('@')[0];
+}
 
-router.post('/contacts', requireAuth, async (req, res) => {
-  const { phone, name, company, extra, notes } = req.body;
-  if (!phone) return res.status(400).json({ error: 'Telefono requerido' });
+// Busca contacto por número, tolerando variantes con/sin 9
+async function findContactByPhone(phone) {
   const clean = normalizePhone(phone);
-  await query(
-    'INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
-    [clean, name || '', company || '', extra || '', notes || '']
-  );
-  // Si ya existía, actualizar datos
-  await query(
-    'UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE phone = ? AND (name = \'\' OR name IS NULL OR name = phone)',
-    [name || '', company || '', extra || '', notes || '', clean]
-  );
-  const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [clean]);
-  res.json(c);
-});
+  let c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [clean]);
+  if (c) return c;
 
-router.put('/contacts/:id', requireAuth, async (req, res) => {
-  const { name, company, extra, notes } = req.body;
-  await query('UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE id = ?',
-    [name, company, extra, notes, req.params.id]);
-  res.json({ ok: true });
-});
-
-// Guardar contacto desde conversación (upsert por JID/phone)
-router.post('/contacts/from-conversation', requireAuth, async (req, res) => {
-  const { jid, name, company, extra, notes } = req.body;
-  if (!jid) return res.status(400).json({ error: 'jid requerido' });
-  const phone = normalizePhone(jid.split('@')[0]);
-  await query(
-    'INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
-    [phone, name || phone, company || '', extra || '', notes || '']
-  );
-  await query(
-    'UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE phone = ?',
-    [name || phone, company || '', extra || '', notes || '', phone]
-  );
-  const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [phone]);
-  // Vincular con la conversación
-  if (c) {
-    await query('UPDATE conversations SET contact_id = ? WHERE jid = ?', [c.id, jid]);
+  // Intentar variante: si tiene 549 buscar sin 9, y viceversa
+  let alt = clean;
+  if (clean.startsWith('549')) {
+    alt = '54' + clean.slice(3); // quitar el 9
+  } else if (clean.startsWith('54') && !clean.startsWith('549')) {
+    alt = '549' + clean.slice(2); // agregar el 9
   }
-  res.json(c);
-});
 
-router.delete('/contacts/:id', requireAuth, requireAdmin, async (req, res) => {
-  await query('DELETE FROM contacts WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-});
+  return await queryOne('SELECT * FROM contacts WHERE phone = ?', [alt]);
+}
 
-router.post('/contacts/:id/labels/:labelId', requireAuth, async (req, res) => {
-  await query('INSERT OR IGNORE INTO contact_labels (contact_id, label_id) VALUES (?, ?)', [req.params.id, req.params.labelId]);
-  res.json({ ok: true });
-});
-
-router.delete('/contacts/:id/labels/:labelId', requireAuth, async (req, res) => {
-  await query('DELETE FROM contact_labels WHERE contact_id = ? AND label_id = ?', [req.params.id, req.params.labelId]);
-  res.json({ ok: true });
-});
-
-// Import CSV contacts
-router.post('/contacts/import', requireAuth, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Sin archivo' });
-  let imported = 0, skipped = 0;
-  const rows = [];
-  await new Promise(resolve => {
-    fs.createReadStream(req.file.path).pipe(csvParser()).on('data', row => rows.push(row)).on('end', resolve);
-  });
-  for (const row of rows) {
-    const raw = row.phone || row.telefono || row.numero || Object.values(row)[0] || '';
-    const phone = normalizePhone(raw);
-    if (phone.length >= 7) {
-      await query('INSERT OR IGNORE INTO contacts (phone, name, company, extra) VALUES (?, ?, ?, ?)',
-        [phone, row.name || row.nombre || '', row.company || row.empresa || '', row.extra || row.campo || '']);
-      imported++;
-    } else skipped++;
+function getMessageText(msg) {
+  if (!msg.message) return { type: 'unknown', text: '' };
+  const type = getContentType(msg.message);
+  const m = msg.message;
+  let text = '';
+  switch (type) {
+    case 'conversation': text = m.conversation; break;
+    case 'extendedTextMessage': text = m.extendedTextMessage?.text || ''; break;
+    case 'imageMessage': text = m.imageMessage?.caption || '[Imagen]'; break;
+    case 'videoMessage': text = m.videoMessage?.caption || '[Video]'; break;
+    case 'audioMessage': text = '[Audio]'; break;
+    case 'documentMessage': text = `[Archivo: ${m.documentMessage?.fileName || ''}]`; break;
+    case 'stickerMessage': text = '[Sticker]'; break;
+    case 'locationMessage': text = '[Ubicacion]'; break;
+    default: text = `[${type || 'mensaje'}]`;
   }
-  fs.unlinkSync(req.file.path);
-  res.json({ imported, skipped });
-});
+  return { type: type || 'text', text };
+}
 
-// ─── Labels ───────────────────────────────────────────────────────────────────
+// ─── Auto-reply bot ───────────────────────────────────────────────────────────
 
-router.get('/labels', requireAuth, async (req, res) => res.json(await query('SELECT * FROM labels ORDER BY name')));
+function isBusinessHours(config) {
+  if (!config?.is_active) return true;
+  const now = new Date();
+  const day = now.getDay();
+  const workDays = (config.working_days || '1,2,3,4,5').split(',').map(Number);
+  if (!workDays.includes(day)) return false;
+  const [sh, sm] = config.schedule_start.split(':').map(Number);
+  const [eh, em] = config.schedule_end.split(':').map(Number);
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  return nowMin >= sh * 60 + sm && nowMin <= eh * 60 + em;
+}
 
-router.post('/labels', requireAuth, async (req, res) => {
-  const rows = await query('INSERT INTO labels (name, color, description) VALUES (?, ?, ?)',
-    [req.body.name, req.body.color || '#6366f1', req.body.description || '']);
-  res.json({ id: rows[0]?.lastInsertRowid, ...req.body });
-});
+const fieldPrompts = {
+  name: '¿Cuál es tu nombre?',
+  email: '¿Cuál es tu email?',
+  phone: '¿En qué número podemos llamarte?',
+  reason: '¿Cuál es el motivo de tu consulta?',
+};
 
-router.put('/labels/:id', requireAuth, async (req, res) => {
-  await query('UPDATE labels SET name = ?, color = ?, description = ? WHERE id = ?',
-    [req.body.name, req.body.color, req.body.description, req.params.id]);
-  res.json({ ok: true });
-});
+async function runAutoReplyBot(jid, incomingText, conv) {
+  const config = await queryOne('SELECT * FROM auto_reply_config LIMIT 1');
+  if (!config || !config.is_active) return false;
+  if (isBusinessHours(config)) return false;
 
-router.delete('/labels/:id', requireAuth, requireAdmin, async (req, res) => {
-  await query('DELETE FROM labels WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-});
+  const botState = conv?.bot_state || 'idle';
+  const collected = JSON.parse(conv?.bot_collected || '{}');
+  const fields = JSON.parse(config.collect_fields || '["name","email","phone","reason"]');
 
-// ─── Conversations ────────────────────────────────────────────────────────────
+  let responseText = '';
+  let newState = botState;
+  let newCollected = { ...collected };
 
-router.get('/conversations', requireAuth, async (req, res) => {
-  const { status, assigned, search } = req.query;
-
-  // Extraer teléfono del JID: "5491123456789@s.whatsapp.net" → "5491123456789"
-  const phoneFromJid = USE_PG
-    ? `SPLIT_PART(cv.jid, '@', 1)`
-    : `SUBSTR(cv.jid, 1, INSTR(cv.jid, '@') - 1)`;
-
-  let sql = `
-    SELECT cv.*,
-      COALESCE(c.name, cv.wa_push_name) as contact_name,
-      COALESCE(c.phone) as contact_phone,
-      c.company as company,
-      u.display_name as assigned_name, u.color as assigned_color
-    FROM conversations cv
-    LEFT JOIN contacts c ON cv.contact_id = c.id
-    LEFT JOIN users u ON cv.assigned_to = u.id
-    WHERE 1=1
-  `;
-  const params = [];
-  if (status && status !== 'all') { sql += ' AND cv.status = ?'; params.push(status); }
-  if (assigned === 'me') { sql += ' AND cv.assigned_to = ?'; params.push(req.session.user.id); }
-  if (search) {
-    sql += ' AND (c.name LIKE ? OR c.phone LIKE ? OR cv.last_message LIKE ?)';
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`);
+  if (botState === 'idle') {
+    responseText = config.greeting_message || 'Hola! Estamos fuera de horario.';
+    if (fields.length > 0) {
+      responseText += `\n\n${fieldPrompts[fields[0]] || fields[0]}`;
+      newState = `collecting_${fields[0]}`;
+    } else {
+      newState = 'done';
+    }
+  } else if (botState.startsWith('collecting_')) {
+    const currentField = botState.replace('collecting_', '');
+    newCollected[currentField] = incomingText.trim();
+    const idx = fields.indexOf(currentField);
+    const next = fields[idx + 1];
+    if (next) {
+      responseText = fieldPrompts[next] || `Y tu ${next}?`;
+      newState = `collecting_${next}`;
+    } else {
+      const summary = Object.entries(newCollected)
+        .map(([k, v]) => `- ${k}: ${v}`).join('\n');
+      responseText = `Gracias! Tomamos nota:\n\n${summary}\n\nTe respondemos en el proximo horario de atencion.`;
+      newState = 'done';
+      if (io) io.emit('bot:lead_collected', { jid, phone: extractPhone(jid), data: newCollected, time: new Date().toISOString() });
+      await query('INSERT INTO activity_log (action, target_jid, detail) VALUES (?, ?, ?)',
+        ['bot_collected', jid, JSON.stringify(newCollected)]);
+    }
+  } else if (botState === 'done') {
+    responseText = `Hola de nuevo! Ya recibimos tu consulta. Te respondemos en horario de atencion (${config.schedule_start} - ${config.schedule_end}).`;
   }
-  sql += ' ORDER BY cv.last_message_at DESC LIMIT 200';
 
+  if (responseText && sock) {
+    await sock.sendMessage(jid, { text: responseText });
+    await saveMessage({
+      message_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      jid, direction: 'out', type: 'text',
+      content: responseText, timestamp: Date.now(),
+      is_auto_reply: 1, sent_by: null,
+    });
+    await query(
+      'UPDATE conversations SET bot_state = ?, bot_collected = ?, updated_at = datetime(\'now\') WHERE jid = ?',
+      [newState, JSON.stringify(newCollected), jid]
+    );
+  }
+  return true;
+}
+
+// ─── DB helpers ───────────────────────────────────────────────────────────────
+
+async function saveMessage({ message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by }) {
   try {
-    const rows = await query(sql, params);
-    const result = await Promise.all(rows.map(async (row) => {
-      const labels = await query(`
-        SELECT l.id, l.name, l.color FROM conversation_labels cvl
-        JOIN labels l ON cvl.label_id = l.id WHERE cvl.conversation_id = ?`, [row.id]);
-      // Si no hay nombre en CRM, usar el número como fallback
-      if (!row.contact_name) {
-        row.contact_name = row.jid.split('@')[0];
-      }
-      return { ...row, labels };
-    }));
-    res.json(result);
-  } catch (e) {
-    console.error('Error en GET /conversations:', e.message);
-    // Fallback: query mínima sin JOINs complejos
+    await query(
+      `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (message_id) DO NOTHING`,
+      [message_id, jid, direction, type, content || '', timestamp, is_auto_reply ? 1 : 0, sent_by || null]
+    );
+  } catch(e) {
+    console.error('[saveMessage] Error:', e.message, '| jid:', jid, '| msg_id:', message_id);
+  }
+}
+
+async function upsertConversationHistory(jid, contactId, lastMessage, lastMessageAt, direction) {
+  const existing = await queryOne('SELECT id, last_message_at FROM conversations WHERE jid = ?', [jid]);
+  if (existing) {
+    // Solo actualizar last_message si este mensaje es más reciente
+    await query(
+      `UPDATE conversations SET
+        contact_id = COALESCE(contact_id, ?),
+        last_message = CASE WHEN last_message_at < ? THEN ? ELSE last_message END,
+        last_message_at = CASE WHEN last_message_at < ? THEN ? ELSE last_message_at END
+       WHERE jid = ?`,
+      [contactId || null, lastMessageAt, lastMessage, lastMessageAt, lastMessageAt, jid]
+    );
+  } else {
+    await query(
+      `INSERT INTO conversations (jid, contact_id, last_message, last_message_at, unread_count) VALUES (?, ?, ?, ?, 0)`,
+      [jid, contactId || null, lastMessage, lastMessageAt]
+    );
+  }
+}
+
+async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pushName = null) {
+  const existing = await queryOne('SELECT id, unread_count FROM conversations WHERE jid = ?', [jid]);
+  if (existing) {
+    await query(
+      `UPDATE conversations SET
+        contact_id = COALESCE(?, contact_id),
+        wa_push_name = COALESCE(wa_push_name, ?),
+        last_message = ?,
+        last_message_at = ?,
+        unread_count = unread_count + 1,
+        updated_at = datetime('now')
+       WHERE jid = ?`,
+      [contactId || null, pushName, lastMessage, lastMessageAt, jid]
+    );
+  } else {
+    await query(
+      `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count)
+       VALUES (?, ?, ?, ?, ?, 1)`,
+      [jid, contactId || null, pushName, lastMessage, lastMessageAt]
+    );
+  }
+}
+
+// ─── Process incoming message ─────────────────────────────────────────────────
+
+async function processMessage(msg) {
+  if (!msg.message || msg.key.fromMe) return;
+
+  const jid = msg.key.remoteJid;
+  if (!jid || jid.includes('broadcast') || jid.endsWith('@g.us')) return;
+
+  const rawPhone = extractPhone(jid);
+  const phone = normalizePhone(rawPhone);
+  const { type, text } = getMessageText(msg);
+  const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+
+  // Buscar contacto existente (tolerando variantes con/sin 9)
+  let contact = await findContactByPhone(phone);
+
+  if (!contact) {
+    // Crear contacto nuevo — usar RETURNING para PostgreSQL
     try {
       const rows = await query(
-        `SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200`
+        'INSERT INTO contacts (phone, name) VALUES (?, ?) ON CONFLICT (phone) DO UPDATE SET name = COALESCE(contacts.name, EXCLUDED.name) RETURNING id, name, phone',
+        [phone, msg.pushName || phone]
       );
-      res.json(rows.map(r => ({ ...r, labels: [], contact_name: r.wa_push_name || r.jid.split('@')[0] })));
-    } catch (e2) {
-      res.status(500).json({ error: e2.message });
+      contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+    } catch (e) {
+      // Fallback SQLite
+      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName || phone]);
+      contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
     }
-  }
-});
-
-router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {
-  const msgs = await query(`
-    SELECT m.*, u.display_name as sent_by_name, u.color as sent_by_color
-    FROM messages m LEFT JOIN users u ON m.sent_by = u.id
-    WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 150
-  `, [decodeURIComponent(req.params.jid)]);
-  res.json(msgs);
-});
-
-router.post('/conversations/:jid/read', requireAuth, async (req, res) => {
-  const jid = decodeURIComponent(req.params.jid);
-  await query('UPDATE conversations SET unread_count = 0 WHERE jid = ?', [jid]);
-  await query('UPDATE messages SET is_read = 1 WHERE jid = ?', [jid]);
-  res.json({ ok: true });
-});
-
-router.put('/conversations/:jid/status', requireAuth, async (req, res) => {
-  const jid = decodeURIComponent(req.params.jid);
-  await query('UPDATE conversations SET status = ?, updated_at = datetime(\'now\') WHERE jid = ?', [req.body.status, jid]);
-  res.json({ ok: true });
-});
-
-router.put('/conversations/:jid/assign', requireAuth, async (req, res) => {
-  const jid = decodeURIComponent(req.params.jid);
-  await query('UPDATE conversations SET assigned_to = ?, updated_at = datetime(\'now\') WHERE jid = ?', [req.body.user_id || null, jid]);
-  res.json({ ok: true });
-});
-
-router.post('/conversations/:jid/labels/:labelId', requireAuth, async (req, res) => {
-  const jid = decodeURIComponent(req.params.jid);
-  const conv = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
-  if (!conv) return res.status(404).json({ error: 'Conversacion no encontrada' });
-  await query('INSERT OR IGNORE INTO conversation_labels (conversation_id, label_id) VALUES (?, ?)', [conv.id, req.params.labelId]);
-  res.json({ ok: true });
-});
-
-router.delete('/conversations/:jid/labels/:labelId', requireAuth, async (req, res) => {
-  const jid = decodeURIComponent(req.params.jid);
-  const conv = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
-  if (!conv) return res.status(404).json({ error: 'Conversacion no encontrada' });
-  await query('DELETE FROM conversation_labels WHERE conversation_id = ? AND label_id = ?', [conv.id, req.params.labelId]);
-  res.json({ ok: true });
-});
-
-// Eliminar conversación (soft: solo del CRM, hard: también mensajes)
-router.delete('/conversations/:jid', requireAuth, async (req, res) => {
-  const jid = decodeURIComponent(req.params.jid);
-  const { hard } = req.query; // ?hard=1 para borrar mensajes también
-  const conv = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
-  if (!conv) return res.status(404).json({ error: 'Conversacion no encontrada' });
-
-  await query('DELETE FROM conversation_labels WHERE conversation_id = ?', [conv.id]);
-
-  if (hard === '1') {
-    await query('DELETE FROM messages WHERE jid = ?', [jid]);
+  } else if (!contact.name && msg.pushName) {
+    await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
+    contact.name = msg.pushName;
   }
 
-  await query('DELETE FROM conversations WHERE jid = ?', [jid]);
-  res.json({ ok: true });
-});
-
-// ─── Send Message ─────────────────────────────────────────────────────────────
-
-router.post('/send', requireAuth, async (req, res) => {
-  const { phone, message, jid } = req.body;
-  const target = phone || (jid ? jid.split('@')[0] : null);
-  if (!target || !message) return res.status(400).json({ error: 'phone/jid y message requeridos' });
-  try {
-    const cleanPhone = normalizePhone(target);
-    await sendMessage(cleanPhone, message, req.session.user.id);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Enviar archivo de biblioteca a un chat
-router.post('/send-file', requireAuth, async (req, res) => {
-  const { jid, file_id, caption } = req.body;
-  if (!jid || !file_id) return res.status(400).json({ error: 'jid y file_id requeridos' });
-  const file = await queryOne('SELECT * FROM file_library WHERE id = ?', [file_id]);
-  if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-  const filePath = path.join(FILES_DIR, file.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Archivo no encontrado en disco' });
-  try {
-    const phone = normalizePhone(jid.split('@')[0]);
-    await sendFile(phone, filePath, file.mime_type, file.original_name, caption || '', req.session.user.id);
-    await query('UPDATE file_library SET use_count = use_count + 1 WHERE id = ?', [file_id]);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── Campaigns ────────────────────────────────────────────────────────────────
-
-router.get('/campaigns', requireAuth, async (req, res) => {
-  res.json(await query(`
-    SELECT cp.*, u.display_name as created_by_name
-    FROM campaigns cp LEFT JOIN users u ON cp.created_by = u.id
-    ORDER BY cp.created_at DESC`));
-});
-
-router.post('/campaigns', requireAuth, async (req, res) => {
-  const { name, type, template, delay_min, delay_max, scheduled_at, contacts: contactList } = req.body;
-  if (!name || !template) return res.status(400).json({ error: 'name y template requeridos' });
-
-  const rows = await query(
-    'INSERT INTO campaigns (name, type, template, delay_min, delay_max, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    [name, type || 'general', template, delay_min || 8, delay_max || 25, scheduled_at || null, req.session.user.id]
-  );
-  const campaignId = rows[0]?.lastInsertRowid;
-
-  if (contactList?.length) {
-    for (const c of contactList) {
-      const phone = normalizePhone(c.phone || '');
-      if (phone.length < 7) continue;
-      const existing = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
-      await query(
-        'INSERT INTO campaign_contacts (campaign_id, contact_id, phone, name, extra_field) VALUES (?, ?, ?, ?, ?)',
-        [campaignId, existing?.id || null, phone, c.name || '', c.extra || '']
-      );
-    }
-    const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [campaignId]);
-    await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, campaignId]);
-  }
-
-  res.json({ id: campaignId, ok: true });
-});
-
-router.put('/campaigns/:id', requireAuth, async (req, res) => {
-  const { name, type, template, delay_min, delay_max, scheduled_at } = req.body;
-  const camp = await queryOne('SELECT * FROM campaigns WHERE id = ?', [req.params.id]);
-  if (!camp) return res.status(404).json({ error: 'Campaña no encontrada' });
-  if (camp.status === 'running') return res.status(409).json({ error: 'No se puede editar una campaña en curso' });
-  await query(
-    'UPDATE campaigns SET name=?, type=?, template=?, delay_min=?, delay_max=?, scheduled_at=? WHERE id=?',
-    [name, type, template, delay_min || 8, delay_max || 25, scheduled_at || null, req.params.id]
-  );
-  res.json({ ok: true });
-});
-
-router.delete('/campaigns/:id', requireAuth, async (req, res) => {
-  const camp = await queryOne('SELECT status FROM campaigns WHERE id = ?', [req.params.id]);
-  if (!camp) return res.status(404).json({ error: 'Campaña no encontrada' });
-  if (camp.status === 'running') return res.status(409).json({ error: 'No se puede eliminar una campaña en curso' });
-  await query('DELETE FROM campaign_contacts WHERE campaign_id = ?', [req.params.id]);
-  await query('DELETE FROM campaigns WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-});
-
-router.post('/campaigns/:id/contacts/add', requireAuth, async (req, res) => {
-  const { contacts } = req.body;
-  if (!Array.isArray(contacts) || !contacts.length) return res.status(400).json({ error: 'contacts requerido' });
-  let added = 0;
-  for (const c of contacts) {
-    const phone = normalizePhone(c.phone || '');
-    if (phone.length < 7) continue;
-    // Evitar duplicados en la campaña
-    const exists = await queryOne('SELECT id FROM campaign_contacts WHERE campaign_id = ? AND phone = ?', [req.params.id, phone]);
-    if (exists) continue;
-    const contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
+  // Actualizar contact_id en conversación si faltaba
+  if (contact?.id) {
     await query(
-      'INSERT INTO campaign_contacts (campaign_id, contact_id, phone, name, extra_field) VALUES (?, ?, ?, ?, ?)',
-      [req.params.id, contact?.id || null, phone, c.name || '', c.extra || '']
-    );
-    added++;
+      'UPDATE conversations SET contact_id = ? WHERE jid = ? AND contact_id IS NULL',
+      [contact.id, jid]
+    ).catch(() => {});
   }
-  const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [req.params.id]);
-  await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, req.params.id]);
-  res.json({ added, total: cnt?.n || 0 });
-});
 
-router.delete('/campaigns/:id/contacts/:contactId', requireAuth, async (req, res) => {
-  await query('DELETE FROM campaign_contacts WHERE id = ? AND campaign_id = ?', [req.params.contactId, req.params.id]);
-  const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ? AND status = ?', [req.params.id, 'pending']);
-  await query('UPDATE campaigns SET total = (SELECT COUNT(*) FROM campaign_contacts WHERE campaign_id = ?) WHERE id = ?', [req.params.id, req.params.id]);
-  res.json({ ok: true });
-});
-
-router.post('/campaigns/:id/reset', requireAuth, async (req, res) => {
-  const camp = await queryOne('SELECT status FROM campaigns WHERE id = ?', [req.params.id]);
-  if (camp?.status === 'running') return res.status(409).json({ error: 'Campaña en curso' });
-  await query("UPDATE campaign_contacts SET status = 'pending', sent_at = NULL, error = NULL WHERE campaign_id = ?", [req.params.id]);
-  await query("UPDATE campaigns SET status = 'draft', sent = 0, failed = 0 WHERE id = ?", [req.params.id]);
-  res.json({ ok: true });
-});
-
-
-router.get('/campaigns/:id/contacts', requireAuth, async (req, res) => {
-  res.json(await query('SELECT * FROM campaign_contacts WHERE campaign_id = ? ORDER BY id', [req.params.id]));
-});
-
-router.post('/campaigns/:id/start', requireAuth, async (req, res) => {
-  if (isRunning()) return res.status(409).json({ error: 'Ya hay una campaña activa' });
-  res.json({ ok: true });
-  runCampaign(parseInt(req.params.id), req.session.user.id).catch(console.error);
-});
-
-router.post('/campaigns/:id/cancel', requireAuth, (req, res) => {
-  requestCancel();
-  res.json({ ok: true });
-});
-
-router.post('/campaigns/:id/import', requireAuth, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Sin archivo' });
-  const rows = [];
-  await new Promise(resolve => {
-    fs.createReadStream(req.file.path).pipe(csvParser()).on('data', row => rows.push(row)).on('end', resolve);
+  // Guardar mensaje usando JID original de WhatsApp
+  await saveMessage({
+    message_id: msg.key.id,
+    jid, direction: 'in', type, content: text,
+    timestamp, is_auto_reply: 0, sent_by: null,
   });
-  let count = 0;
-  for (const row of rows) {
-    const raw = row.phone || row.telefono || row.numero || Object.values(row)[0] || '';
-    const phone = normalizePhone(raw);
-    if (phone.length >= 7) {
-      await query('INSERT INTO campaign_contacts (campaign_id, phone, name, extra_field) VALUES (?, ?, ?, ?)',
-        [req.params.id, phone, row.name || row.nombre || '', row.extra || row.campo || '']);
-      count++;
-    }
-  }
-  const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [req.params.id]);
-  await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, req.params.id]);
-  fs.unlinkSync(req.file.path);
-  res.json({ imported: count });
-});
 
-// ─── Quick Replies ────────────────────────────────────────────────────────────
+  // Upsert conversación
+  await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString(), msg.pushName || null);
 
-router.get('/quick-replies', requireAuth, async (req, res) => res.json(await query('SELECT * FROM quick_replies ORDER BY category, name')));
+  const conv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [jid]);
 
-router.post('/quick-replies', requireAuth, async (req, res) => {
-  const rows = await query('INSERT INTO quick_replies (name, trigger_text, content, category) VALUES (?, ?, ?, ?)',
-    [req.body.name, req.body.trigger_text || '', req.body.content, req.body.category || 'general']);
-  res.json({ id: rows[0]?.lastInsertRowid, ok: true });
-});
+  const autoHandled = await runAutoReplyBot(jid, text, conv).catch(e => {
+    console.error('Error en auto-reply:', e.message);
+    return false;
+  });
 
-router.put('/quick-replies/:id', requireAuth, async (req, res) => {
-  await query('UPDATE quick_replies SET name = ?, trigger_text = ?, content = ?, category = ? WHERE id = ?',
-    [req.body.name, req.body.trigger_text, req.body.content, req.body.category, req.params.id]);
-  res.json({ ok: true });
-});
-
-router.delete('/quick-replies/:id', requireAuth, async (req, res) => {
-  await query('DELETE FROM quick_replies WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-});
-
-// ─── Auto Reply Config ────────────────────────────────────────────────────────
-
-router.get('/auto-reply', requireAuth, async (req, res) => {
-  res.json(await queryOne('SELECT * FROM auto_reply_config LIMIT 1') || {});
-});
-
-router.put('/auto-reply', requireAuth, async (req, res) => {
-  const { is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields } = req.body;
-  const existing = await queryOne('SELECT id FROM auto_reply_config LIMIT 1');
-  if (existing) {
-    await query(
-      'UPDATE auto_reply_config SET is_active=?, schedule_start=?, schedule_end=?, working_days=?, greeting_message=?, collect_fields=?, updated_at=datetime(\'now\') WHERE id=1',
-      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, JSON.stringify(collect_fields)]
-    );
-  } else {
-    await query(
-      'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields) VALUES (?,?,?,?,?,?)',
-      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, JSON.stringify(collect_fields)]
-    );
-  }
-  res.json({ ok: true });
-});
-
-// ─── Activity Log ─────────────────────────────────────────────────────────────
-
-router.get('/activity', requireAuth, requireAdmin, async (req, res) => {
-  res.json(await query(`
-    SELECT al.*, u.display_name, u.color FROM activity_log al
-    LEFT JOIN users u ON al.user_id = u.id ORDER BY al.created_at DESC LIMIT 100`));
-});
-
-// ─── AI Webhook ───────────────────────────────────────────────────────────────
-
-router.post('/ai/respond', async (req, res) => {
-  const { jid, response: text } = req.body;
-  if (!jid || !text) return res.status(400).json({ error: 'jid y response requeridos' });
-  try {
-    const phone = normalizePhone(jid.split('@')[0]);
-    await sendMessage(phone, text, null);
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── File Library ─────────────────────────────────────────────────────────────
-
-router.get('/files', requireAuth, async (req, res) => {
-  const files = await query(`
-    SELECT f.*, u.display_name as uploaded_by_name
-    FROM file_library f LEFT JOIN users u ON f.uploaded_by = u.id
-    ORDER BY f.category, f.name`);
-  res.json(files);
-});
-
-router.post('/files', requireAuth, fileUpload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Sin archivo' });
-  const { name, description, category } = req.body;
-  const rows = await query(
-    'INSERT INTO file_library (name, description, filename, original_name, mime_type, size, category, uploaded_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-    [name || req.file.originalname, description || '', req.file.filename, req.file.originalname,
-     req.file.mimetype, req.file.size, category || 'general', req.session.user.id]
-  );
-  res.json({ id: rows[0]?.lastInsertRowid, ok: true });
-});
-
-router.put('/files/:id', requireAuth, async (req, res) => {
-  const { name, description, category } = req.body;
-  await query('UPDATE file_library SET name = ?, description = ?, category = ? WHERE id = ?',
-    [name, description, category, req.params.id]);
-  res.json({ ok: true });
-});
-
-router.delete('/files/:id', requireAuth, async (req, res) => {
-  const file = await queryOne('SELECT * FROM file_library WHERE id = ?', [req.params.id]);
-  if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-  const filePath = path.join(FILES_DIR, file.filename);
-  if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  await query('DELETE FROM file_library WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-});
-
-// Preview/descarga de archivo de biblioteca
-router.get('/files/:id/download', requireAuth, async (req, res) => {
-  const file = await queryOne('SELECT * FROM file_library WHERE id = ?', [req.params.id]);
-  if (!file) return res.status(404).json({ error: 'Archivo no encontrado' });
-  const filePath = path.join(FILES_DIR, file.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Archivo no encontrado en disco' });
-  res.setHeader('Content-Type', file.mime_type);
-  res.setHeader('Content-Disposition', `inline; filename="${file.original_name}"`);
-  fs.createReadStream(filePath).pipe(res);
-});
-
-// ─── AI Config ────────────────────────────────────────────────────────────────
-
-router.get('/ai-config', requireAuth, requireAdmin, async (req, res) => {
-  const cfg = await queryOne('SELECT * FROM ai_config LIMIT 1') || {};
-  // No devolver la API key completa — solo indicar si está cargada
-  if (cfg.api_key) cfg.api_key_set = true;
-  delete cfg.api_key;
-  res.json(cfg);
-});
-
-router.put('/ai-config', requireAuth, requireAdmin, async (req, res) => {
-  const {
-    is_active, provider, api_key, model, system_prompt,
-    company_name, company_context, response_delay_min, response_delay_max,
-    max_tokens, temperature, only_outside_hours,
-    working_hours_start, working_hours_end, working_days,
-  } = req.body;
-
-  const existing = await queryOne('SELECT id FROM ai_config LIMIT 1');
-  if (existing) {
-    // Solo actualizar api_key si se envió una nueva (no vacía)
-    const keyClause = api_key ? ', api_key = ?' : '';
-    const keyParam  = api_key ? [api_key] : [];
-    await query(
-      `UPDATE ai_config SET
-        is_active=?, provider=?, model=?, system_prompt=?, company_name=?,
-        company_context=?, response_delay_min=?, response_delay_max=?,
-        max_tokens=?, temperature=?, only_outside_hours=?,
-        working_hours_start=?, working_hours_end=?, working_days=?,
-        updated_at=datetime('now') ${keyClause}
-       WHERE id=1`,
-      [is_active?1:0, provider, model, system_prompt, company_name,
-       company_context, response_delay_min||3, response_delay_max||8,
-       max_tokens||300, temperature||0.7, only_outside_hours?1:0,
-       working_hours_start, working_hours_end, working_days||'1,2,3,4,5',
-       ...keyParam]
-    );
-  } else {
-    await query(
-      `INSERT INTO ai_config
-        (is_active, provider, api_key, model, system_prompt, company_name,
-         company_context, response_delay_min, response_delay_max, max_tokens,
-         temperature, only_outside_hours, working_hours_start, working_hours_end, working_days)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-      [is_active?1:0, provider, api_key||'', model, system_prompt||'', company_name||'',
-       company_context||'', response_delay_min||3, response_delay_max||8,
-       max_tokens||300, temperature||0.7, only_outside_hours?1:0,
-       working_hours_start||'09:00', working_hours_end||'18:00', working_days||'1,2,3,4,5']
-    );
-  }
-  res.json({ ok: true });
-});
-
-// ─── AI Documents ─────────────────────────────────────────────────────────────
-
-router.get('/ai-documents', requireAuth, requireAdmin, async (req, res) => {
-  const docs = await query('SELECT id, name, file_type, size, is_active, created_at FROM ai_documents ORDER BY created_at DESC');
-  res.json(docs);
-});
-
-router.post('/ai-documents', requireAuth, requireAdmin, upload.single('file'), async (req, res) => {
-  try {
-    const { name } = req.body;
-    if (!req.file && !req.body.text_content) return res.status(400).json({ error: 'Falta archivo o texto' });
-
-    let content = '';
-    let fileType = 'text';
-    let size = 0;
-
-    if (req.file) {
-      fileType = req.file.mimetype.includes('pdf') ? 'pdf' : 'text';
-      size = req.file.size;
-
-      if (fileType === 'pdf') {
-        try {
-          const pdfParse = require('pdf-parse');
-          const data = await pdfParse(req.file.buffer);
-          content = data.text.replace(/\s+/g, ' ').trim();
-        } catch(e) {
-          return res.status(400).json({ error: 'No se pudo leer el PDF: ' + e.message });
-        }
-      } else {
-        content = req.file.buffer.toString('utf-8');
-      }
-    } else {
-      content = req.body.text_content;
-      size = content.length;
-    }
-
-    // Truncar a 50.000 caracteres para no explotar el contexto
-    if (content.length > 50000) content = content.substring(0, 50000) + '\n[... documento truncado ...]';
-
-    await query(
-      `INSERT INTO ai_documents (name, content, file_type, size) VALUES (?, ?, ?, ?)`,
-      [name || req.file?.originalname || 'Documento', content, fileType, size]
-    );
-    res.json({ ok: true });
-  } catch(e) {
-    console.error('Error subiendo documento IA:', e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-router.put('/ai-documents/:id/toggle', requireAuth, requireAdmin, async (req, res) => {
-  const doc = await queryOne('SELECT is_active FROM ai_documents WHERE id = ?', [req.params.id]);
-  if (!doc) return res.status(404).json({ error: 'No encontrado' });
-  await query('UPDATE ai_documents SET is_active = ? WHERE id = ?', [doc.is_active ? 0 : 1, req.params.id]);
-  res.json({ ok: true });
-});
-
-router.delete('/ai-documents/:id', requireAuth, requireAdmin, async (req, res) => {
-  await query('DELETE FROM ai_documents WHERE id = ?', [req.params.id]);
-  res.json({ ok: true });
-});
-
-// ─── Sistema / Administración ─────────────────────────────────────────────────
-
-// Estadísticas del sistema (para el panel admin)
-router.get('/system/stats', requireAuth, requireAdmin, async (req, res) => {
-  try {
-    const [convs, msgs, contacts, users] = await Promise.all([
-      queryOne('SELECT COUNT(*) as n FROM conversations'),
-      queryOne('SELECT COUNT(*) as n FROM messages'),
-      queryOne('SELECT COUNT(*) as n FROM contacts'),
-      queryOne('SELECT COUNT(*) as n FROM users WHERE is_active = 1'),
-    ]);
-    const oldestMsg = await queryOne('SELECT MIN(timestamp) as t FROM messages');
-    const newestMsg = await queryOne('SELECT MAX(timestamp) as t FROM messages');
-    res.json({
-      conversations: convs?.n || 0,
-      messages: msgs?.n || 0,
-      contacts: contacts?.n || 0,
-      active_users: users?.n || 0,
-      oldest_message: oldestMsg?.t,
-      newest_message: newestMsg?.t,
+  // Si el auto-reply no manejó el mensaje, intentar con el agente IA
+  if (!autoHandled) {
+    runAIAgent(jid, text, sendMessage).catch(e => {
+      console.error('Error en agente IA:', e.message);
     });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
   }
-});
 
-// Reset/limpieza del sistema — requiere contraseña de confirmación
-router.post('/system/reset', requireAuth, requireAdmin, async (req, res) => {
-  const { password, scope } = req.body;
+  if (io) {
+    const convFull = await queryOne(`
+      SELECT cv.*, c.name as contact_name, c.phone as contact_phone
+      FROM conversations cv LEFT JOIN contacts c ON cv.contact_id = c.id
+      WHERE cv.jid = ?`, [jid]);
+    io.emit('message:new', {
+      jid, phone,
+      contact_name: contact?.name || msg.pushName || phone,
+      content: text, type, timestamp,
+      is_auto_reply: autoHandled,
+      message_id: msg.key.id,
+      conversation: convFull,
+    });
+  }
+}
 
-  // Verificar contraseña del admin actual
-  const adminUser = await queryOne('SELECT password_hash FROM users WHERE id = ?', [req.session.user.id]);
-  if (!adminUser) return res.status(403).json({ error: 'Sin autorización' });
-  const valid = await bcrypt.compare(password, adminUser.password_hash);
-  if (!valid) return res.status(403).json({ error: 'Contraseña incorrecta' });
+// ─── Connect ──────────────────────────────────────────────────────────────────
 
-  const deleted = {};
+async function connect() {
+  // Importar Baileys dinámicamente (es un módulo ESM)
+  if (!makeWASocket) {
+    const baileys = await import('@whiskeysockets/baileys');
+    makeWASocket = baileys.default;
+    useMultiFileAuthState = baileys.useMultiFileAuthState;
+    DisconnectReason = baileys.DisconnectReason;
+    fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+    getContentType = baileys.getContentType;
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
+  const { version } = await fetchLatestBaileysVersion();
+
+  sock = makeWASocket({
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false,
+    browser: ['WhatsApp CRM', 'Chrome', '121.0'],
+    generateHighQualityLinkPreview: false,
+    syncFullHistory: true,   // solicitar historial al móvil
+    markOnlineOnConnect: false,
+  });
+
+  connectionStatus = 'connecting';
+  if (io) io.emit('wa:status', { status: 'connecting' });
+
+  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
+    if (qr) {
+      qrData = await qrcode.toDataURL(qr);
+      connectionStatus = 'qr';
+      if (io) io.emit('wa:qr', { qr: qrData });
+      console.log('QR listo para escanear');
+    }
+
+    if (connection === 'close') {
+      const code = lastDisconnect?.error?.output?.statusCode;
+      const loggedOut = code === DisconnectReason.loggedOut;
+      connectionStatus = 'disconnected';
+      qrData = null;
+      if (io) io.emit('wa:status', { status: 'disconnected' });
+      if (!loggedOut) {
+        const delay = code === 408 ? 2000 : 5000;
+        reconnectTimer = setTimeout(connect, delay);
+      }
+    }
+
+    if (connection === 'open') {
+      connectionStatus = 'connected';
+      qrData = null;
+      const phone = sock.user?.id?.split(':')[0] || '';
+      console.log(`WhatsApp conectado: ${phone}`);
+      if (io) io.emit('wa:status', { status: 'connected', phone });
+    }
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  // Historial sincronizado desde el móvil
+  sock.ev.on('messaging-history.set', async ({ messages: msgs, isLatest }) => {
+    console.log(`Sincronizando historial: ${msgs.length} mensajes (isLatest: ${isLatest})`);
+    let imported = 0;
+    for (const msg of msgs) {
+      try {
+        if (!msg.message || !msg.key?.remoteJid) continue;
+        const jid = msg.key.remoteJid;
+        if (jid.includes('broadcast') || jid.endsWith('@g.us')) continue;
+
+        const { type, text } = getMessageText(msg);
+        if (!text) continue;
+
+        const rawPhone = extractPhone(jid);
+        const phone = normalizePhone(rawPhone);
+        const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+        const direction = msg.key.fromMe ? 'out' : 'in';
+
+        // Verificar si ya existe este mensaje
+        const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
+        if (exists) continue;
+
+        // Upsert contacto
+        let contact = await findContactByPhone(phone);
+        if (!contact) {
+          try {
+            const rows = await query(
+              'INSERT INTO contacts (phone, name) VALUES (?, ?) ON CONFLICT (phone) DO UPDATE SET name = COALESCE(contacts.name, EXCLUDED.name) RETURNING id, name',
+              [phone, msg.pushName || phone]
+            );
+            contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+          } catch (e) {
+            await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName || phone]);
+            contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+          }
+        }
+
+        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: text, timestamp, is_auto_reply: 0, sent_by: null });
+        await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
+        imported++;
+      } catch (e) {
+        // silencioso — mensajes históricos no deben crashear
+      }
+    }
+    if (imported > 0) {
+      console.log(`Historial importado: ${imported} mensajes nuevos`);
+      if (io) io.emit('history:synced', { count: imported });
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of msgs) {
+      await processMessage(msg).catch(e => console.error('Error procesando mensaje:', e.message));
+    }
+  });
+}
+
+// ─── Send message ─────────────────────────────────────────────────────────────
+
+async function sendMessage(phone, text, sentBy = null) {
+  if (!sock || connectionStatus !== 'connected') {
+    throw new Error('WhatsApp no está conectado');
+  }
+
+  // Resolver el JID correcto — algunos contactos usan @lid en vez de @s.whatsapp.net
+  let jid = normalizeJid(phone);
   try {
-    if (scope === 'messages' || scope === 'all') {
-      const r = await query('DELETE FROM messages');
-      deleted.messages = r.rowCount || 0;
+    const [result] = await sock.onWhatsApp(jid);
+    if (result?.exists && result?.jid) {
+      jid = result.jid; // usar el JID real que devuelve WA (puede ser @lid)
     }
-    if (scope === 'conversations' || scope === 'all') {
-      const r = await query('DELETE FROM conversations');
-      deleted.conversations = r.rowCount || 0;
-    }
-    if (scope === 'contacts' || scope === 'all') {
-      const r = await query('DELETE FROM contacts');
-      deleted.contacts = r.rowCount || 0;
-    }
-    if (scope === 'activity' || scope === 'all') {
-      const r = await query('DELETE FROM activity_log');
-      deleted.activity = r.rowCount || 0;
-    }
-    // Nunca borra usuarios, config, ni credenciales WA
-    console.log(`[SYSTEM RESET] scope=${scope} by user ${req.session.user.id}:`, deleted);
-    res.json({ ok: true, deleted });
   } catch(e) {
-    res.status(500).json({ error: e.message });
+    // Si onWhatsApp falla, seguir con el JID normalizado
   }
-});
 
-// Reparar DB: corregir índice unique en messages si falta, sincronizar migraciones
-router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => {
-  const { password } = req.body;
-  const adminUser = await queryOne('SELECT password_hash FROM users WHERE id = ?', [req.session.user.id]);
-  const valid = adminUser && await bcrypt.compare(password, adminUser.password_hash);
-  if (!valid) return res.status(403).json({ error: 'Contraseña incorrecta' });
+  await sock.presenceSubscribe(jid).catch(() => {});
+  await sock.sendPresenceUpdate('composing', jid);
+  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
+  await new Promise(r => setTimeout(r, typingMs));
+  await sock.sendPresenceUpdate('paused', jid);
 
-  const results = [];
-  const ops = [
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
-    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
-    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
-    `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1`,
-    `CREATE TABLE IF NOT EXISTS ai_documents (
-      id SERIAL PRIMARY KEY, name TEXT NOT NULL, content TEXT NOT NULL,
-      file_type TEXT DEFAULT 'text', size INTEGER DEFAULT 0,
-      is_active INTEGER DEFAULT 1, created_at TIMESTAMPTZ DEFAULT NOW()
-    )`,
-    // Forzar is_active = 1 donde está NULL
-    `UPDATE users SET is_active = 1 WHERE is_active IS NULL`,
-    // Asegurar que conversations tiene columnas de timestamps
-    `UPDATE conversations SET last_message_at = NOW() WHERE last_message_at IS NULL AND last_message IS NOT NULL`,
-  ];
+  const sent = await sock.sendMessage(jid, { text });
 
-  for (const sql of ops) {
-    try {
-      await query(sql);
-      results.push({ sql: sql.substring(0, 60) + '…', ok: true });
-    } catch(e) {
-      results.push({ sql: sql.substring(0, 60) + '…', ok: false, err: e.message.substring(0, 80) });
+  await saveMessage({
+    message_id: sent.key.id,
+    jid, direction: 'out', type: 'text',
+    content: text, timestamp: Date.now(),
+    is_auto_reply: 0, sent_by: sentBy,
+  });
+
+  const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
+  if (existing) {
+    await query(
+      `UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`,
+      [text, jid]
+    );
+  } else {
+    await query(
+      `INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, NOW())`,
+      [jid, text]
+    );
+  }
+
+  if (io) {
+    let sentByName = null, sentByColor = null;
+    if (sentBy) {
+      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
+      sentByName = user?.display_name || null;
+      sentByColor = user?.color || null;
     }
+    io.emit('message:sent', {
+      jid,
+      content: text,
+      timestamp: Date.now(),
+      direction: 'out',
+      type: 'text',
+      sent_by: sentBy,
+      sent_by_name: sentByName,
+      sent_by_color: sentByColor,
+    });
   }
-  console.log('[SYSTEM REPAIR-DB]', results);
-  res.json({ ok: true, results });
-});
 
-module.exports = router;
+  return sent;
+}
+
+async function sendFile(phone, filePath, mimeType, fileName, caption = '', sentBy = null) {
+  if (!sock || connectionStatus !== 'connected') throw new Error('WhatsApp no está conectado');
+
+  const jid = normalizeJid(phone);
+  const fileBuffer = fs.readFileSync(filePath);
+
+  let message;
+  if (mimeType.startsWith('image/')) {
+    message = { image: fileBuffer, caption, fileName };
+  } else if (mimeType.startsWith('video/')) {
+    message = { video: fileBuffer, caption, fileName };
+  } else if (mimeType.startsWith('audio/')) {
+    message = { audio: fileBuffer, mimetype: mimeType };
+  } else {
+    message = { document: fileBuffer, mimetype: mimeType, fileName, caption };
+  }
+
+  await sock.presenceSubscribe(jid).catch(() => {});
+  await sock.sendPresenceUpdate('composing', jid);
+  await new Promise(r => setTimeout(r, 1000));
+  await sock.sendPresenceUpdate('paused', jid);
+
+  const sent = await sock.sendMessage(jid, message);
+
+  const content = caption || `[${fileName}]`;
+  await saveMessage({
+    message_id: sent.key.id,
+    jid, direction: 'out', type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage',
+    content, timestamp: Date.now(), is_auto_reply: 0, sent_by: sentBy,
+  });
+
+  const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
+  if (existing) {
+    await query(`UPDATE conversations SET last_message = ?, last_message_at = datetime('now'), updated_at = datetime('now') WHERE jid = ?`, [content, jid]);
+  } else {
+    await query(`INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, datetime('now'))`, [jid, content]);
+  }
+
+  if (io) {
+    let sentByName = null, sentByColor = null;
+    if (sentBy) {
+      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
+      sentByName = user?.display_name || null;
+      sentByColor = user?.color || null;
+    }
+    io.emit('message:sent', {
+      jid: normalizeJid(phone),
+      content,
+      timestamp: Date.now(),
+      sent_by: sentBy,
+      sent_by_name: sentByName,
+      sent_by_color: sentByColor,
+      type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage',
+    });
+  }
+  return sent;
+}
+
+async function logout() {
+  if (sock) {
+    await sock.logout().catch(() => {});
+    sock = null;
+  }
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (fs.existsSync(AUTH_PATH)) {
+    fs.rmSync(AUTH_PATH, { recursive: true, force: true });
+    fs.mkdirSync(AUTH_PATH, { recursive: true });
+  }
+  connectionStatus = 'disconnected';
+  qrData = null;
+  setTimeout(connect, 1000);
+}
+
+// Fuerza re-sincronización del historial desde el teléfono
+// borrando las credenciales de sesión y reconectando
+async function requestHistoryResync() {
+  if (!sock || connectionStatus !== 'connected') {
+    throw new Error('WhatsApp no conectado');
+  }
+  try {
+    // Baileys: fetchAllSupportedFeatures fuerza historial si el sock lo soporta
+    await sock.sendNode({
+      tag: 'iq',
+      attrs: { type: 'get', to: 's.whatsapp.net', xmlns: 'urn:xmpp:whatsapp:dirty' },
+      content: [{ tag: 'clean', attrs: { type: 'account_sync' } }]
+    }).catch(() => {});
+  } catch(e) { /* ignorar */ }
+
+  // Emitir historial nuevamente desde el store de mensajes en memoria si existe
+  if (sock.ev) {
+    sock.ev.emit('messaging-history.set', {
+      messages: [],
+      contacts: [],
+      chats: [],
+      isLatest: false
+    });
+  }
+  return true;
+}
+
+module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };
