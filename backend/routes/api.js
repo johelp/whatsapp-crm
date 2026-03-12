@@ -224,18 +224,17 @@ router.get('/conversations', requireAuth, async (req, res) => {
 
   // Extraer teléfono del JID: "5491123456789@s.whatsapp.net" → "5491123456789"
   const phoneFromJid = USE_PG
-    ? `SPLIT_PART(SPLIT_PART(cv.jid, '@', 1), ':', 1)`
+    ? `SPLIT_PART(cv.jid, '@', 1)`
     : `SUBSTR(cv.jid, 1, INSTR(cv.jid, '@') - 1)`;
 
   let sql = `
     SELECT cv.*,
-      COALESCE(c.name, c2.name, cv.wa_push_name) as contact_name,
-      COALESCE(c.phone, c2.phone) as contact_phone,
-      COALESCE(c.company, c2.company) as company,
+      COALESCE(c.name, cv.wa_push_name) as contact_name,
+      COALESCE(c.phone) as contact_phone,
+      c.company as company,
       u.display_name as assigned_name, u.color as assigned_color
     FROM conversations cv
     LEFT JOIN contacts c ON cv.contact_id = c.id
-    LEFT JOIN contacts c2 ON c.id IS NULL AND c2.phone = ${phoneFromJid}
     LEFT JOIN users u ON cv.assigned_to = u.id
     WHERE 1=1
   `;
@@ -248,14 +247,31 @@ router.get('/conversations', requireAuth, async (req, res) => {
   }
   sql += ' ORDER BY cv.last_message_at DESC LIMIT 200';
 
-  const rows = await query(sql, params);
-  const result = await Promise.all(rows.map(async (row) => {
-    const labels = await query(`
-      SELECT l.id, l.name, l.color FROM conversation_labels cvl
-      JOIN labels l ON cvl.label_id = l.id WHERE cvl.conversation_id = ?`, [row.id]);
-    return { ...row, labels };
-  }));
-  res.json(result);
+  try {
+    const rows = await query(sql, params);
+    const result = await Promise.all(rows.map(async (row) => {
+      const labels = await query(`
+        SELECT l.id, l.name, l.color FROM conversation_labels cvl
+        JOIN labels l ON cvl.label_id = l.id WHERE cvl.conversation_id = ?`, [row.id]);
+      // Si no hay nombre en CRM, usar el número como fallback
+      if (!row.contact_name) {
+        row.contact_name = row.jid.split('@')[0];
+      }
+      return { ...row, labels };
+    }));
+    res.json(result);
+  } catch (e) {
+    console.error('Error en GET /conversations:', e.message);
+    // Fallback: query mínima sin JOINs complejos
+    try {
+      const rows = await query(
+        `SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200`
+      );
+      res.json(rows.map(r => ({ ...r, labels: [], contact_name: r.wa_push_name || r.jid.split('@')[0] })));
+    } catch (e2) {
+      res.status(500).json({ error: e2.message });
+    }
+  }
 });
 
 router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {

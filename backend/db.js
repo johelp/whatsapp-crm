@@ -370,6 +370,18 @@ async function seedData() {
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 
+async function runMigrations() {
+  if (!USE_PG) return; // SQLite se recrea siempre con schema nuevo
+  const migrations = [
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
+  ];
+  for (const sql of migrations) {
+    try { await query(sql); } catch(e) { /* columna ya existe, ignorar */ }
+  }
+  console.log('Migraciones aplicadas');
+}
+
 async function initDB() {
   if (!USE_PG) {
     ensureDataDir();
@@ -389,6 +401,7 @@ async function initDB() {
   }
 
   await createTables();
+  await runMigrations();
   await seedData();
 
   console.log(`Base de datos lista (${USE_PG ? 'PostgreSQL' : 'SQLite/sql.js'})`);
