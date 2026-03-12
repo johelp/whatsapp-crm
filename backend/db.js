@@ -213,7 +213,7 @@ async function createTables() {
       direction TEXT NOT NULL,
       type TEXT DEFAULT 'text',
       content TEXT,
-      timestamp INTEGER,
+      timestamp BIGINT,
       is_read INTEGER DEFAULT 0,
       is_auto_reply INTEGER DEFAULT 0,
       sent_by INTEGER,
@@ -381,6 +381,8 @@ async function runMigrations() {
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
+    // CRÍTICO: timestamp en milisegundos supera el rango de INTEGER (32-bit). Necesita BIGINT.
+    `ALTER TABLE messages ALTER COLUMN timestamp TYPE BIGINT`,
     `CREATE TABLE IF NOT EXISTS ai_documents (
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL,

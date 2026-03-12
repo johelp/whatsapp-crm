@@ -807,6 +807,8 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active INTEGER DEFAULT 1`,
+    // CRÍTICO: timestamp INTEGER (32-bit) no puede guardar ms. Necesita BIGINT.
+    `ALTER TABLE messages ALTER COLUMN timestamp TYPE BIGINT`,
     `CREATE TABLE IF NOT EXISTS ai_documents (
       id SERIAL PRIMARY KEY, name TEXT NOT NULL, content TEXT NOT NULL,
       file_type TEXT DEFAULT 'text', size INTEGER DEFAULT 0,
