@@ -279,11 +279,15 @@ router.get('/conversations', requireAuth, async (req, res) => {
 
 router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {
   const msgs = await query(`
-    SELECT m.*, u.display_name as sent_by_name, u.color as sent_by_color
+    SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
+           m.timestamp::bigint as timestamp,
+           m.is_read, m.is_auto_reply, m.sent_by, m.created_at,
+           u.display_name as sent_by_name, u.color as sent_by_color
     FROM messages m LEFT JOIN users u ON m.sent_by = u.id
-    WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 150
+    WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
   `, [decodeURIComponent(req.params.jid)]);
-  res.json(msgs);
+  // Asegurar que timestamp es siempre número
+  res.json(msgs.map(m => ({ ...m, timestamp: Number(m.timestamp) || 0 })));
 });
 
 router.post('/conversations/:jid/read', requireAuth, async (req, res) => {
@@ -896,40 +900,50 @@ router.post('/system/seed-messages', requireAuth, requireAdmin, async (req, res)
   if (!valid) return res.status(403).json({ error: 'Contraseña incorrecta' });
 
   try {
-    // Contar mensajes actuales
-    const before = await queryOne('SELECT COUNT(*) as n FROM messages');
+    // Primero: limpiar seeds anteriores con timestamps incorrectos (message_id empieza con seed_)
+    await query(`DELETE FROM messages WHERE message_id LIKE 'seed_%'`);
 
-    // Por cada conversación con last_message real, insertar un mensaje sintético
-    // Esto permite que los chats muestren al menos el último mensaje
+    // Asegurar que el campo es BIGINT antes de insertar
+    try { await query(`ALTER TABLE messages ALTER COLUMN timestamp TYPE BIGINT`); } catch(e) {}
+
     const convs = await query(
-      `SELECT jid, last_message, last_message_at, contact_id
+      `SELECT jid, last_message, last_message_at
        FROM conversations
-       WHERE last_message IS NOT NULL
-         AND last_message != ''
+       WHERE last_message IS NOT NULL AND last_message != ''
          AND last_message NOT LIKE '[%]'
        ORDER BY last_message_at DESC`
     );
 
-    let inserted = 0;
+    let inserted = 0, errors = 0;
     for (const c of convs) {
-      const syntheticId = `seed_${c.jid}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      const ts = c.last_message_at
-        ? new Date(c.last_message_at).getTime()
-        : Date.now();
+      // Calcular timestamp en milisegundos correctamente
+      let ts;
+      if (c.last_message_at) {
+        const parsed = new Date(c.last_message_at).getTime();
+        ts = isNaN(parsed) ? Date.now() : parsed;
+      } else {
+        ts = Date.now();
+      }
+
+      const syntheticId = `seed_${c.jid}_${ts}`;
       try {
         await query(
           `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by)
-           VALUES (?, ?, 'in', 'text', ?, ?, 0, NULL)
+           VALUES ($1, $2, 'in', 'text', $3, $4::bigint, 0, NULL)
            ON CONFLICT (message_id) DO NOTHING`,
           [syntheticId, c.jid, c.last_message, ts]
         );
         inserted++;
-      } catch(e) { /* skip */ }
+      } catch(e) {
+        errors++;
+        console.error('[seed] error:', e.message, '| ts:', ts, '| jid:', c.jid);
+      }
     }
 
     const after = await queryOne('SELECT COUNT(*) as n FROM messages');
-    res.json({ ok: true, before: before?.n || 0, after: after?.n || 0, inserted });
+    res.json({ ok: true, inserted, errors, total: Number(after?.n || 0) });
   } catch(e) {
+    console.error('[seed-messages] error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });

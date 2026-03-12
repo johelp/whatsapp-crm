@@ -519,9 +519,11 @@ function renderMessages(msgs) {
 
   let lastDate = '';
   el.innerHTML = msgs.map(m => {
-    const ts = typeof m.timestamp === 'number' ? m.timestamp : new Date(m.timestamp).getTime();
-    const d = new Date(ts);
-    const dateStr = d.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
+    // timestamp puede llegar como string desde PostgreSQL BIGINT — siempre convertir a número
+    const ts = Number(m.timestamp);
+    const d = ts > 0 ? new Date(ts) : null;
+    const dateStr = d ? d.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' }) : 'Fecha desconocida';
+    const timeStr = d ? d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : '--:--';
     const sep = dateStr !== lastDate ? `<div class="msg-date-sep">${dateStr}</div>` : '';
     lastDate = dateStr;
     const agentTag = m.sent_by && m.sent_by_name
@@ -533,7 +535,7 @@ function renderMessages(msgs) {
     <div class="msg-wrap ${m.direction} ${m.is_auto_reply ? 'auto' : ''}">
       <div class="msg-bubble">${esc(content)}</div>
       <div class="msg-meta">
-        <span class="msg-time">${d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}</span>
+        <span class="msg-time">${timeStr}</span>
         ${agentTag}${autoTag}
       </div>
     </div>`;
@@ -544,7 +546,8 @@ function renderMessages(msgs) {
 
 function appendMessage(msg) {
   const el = document.getElementById('messages-area');
-  const d = new Date(msg.timestamp);
+  const ts = Number(msg.timestamp);
+  const d = ts > 0 ? new Date(ts) : new Date();
   const wrap = document.createElement('div');
   wrap.className = `msg-wrap ${msg.direction}`;
 
