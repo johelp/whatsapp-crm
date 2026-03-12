@@ -1716,6 +1716,9 @@ async function renderSettings() {
           <button class="btn-secondary" onclick="systemSeedMessages()" title="Genera mensajes sintéticos desde el último mensaje de cada conversación">
             💾 Seed desde conversaciones
           </button>
+          <button class="btn-secondary" onclick="systemMergeDuplicates()" title="Fusiona conversaciones duplicadas del mismo número (ej: con/sin 9 en Argentina)">
+            🔀 Fusionar duplicados
+          </button>
           <button class="btn-secondary" onclick="systemResyncHistory()" title="Pide a WhatsApp que reenvíe el historial de mensajes">
             🔄 Re-sincronizar historial WA
           </button>
@@ -2268,6 +2271,23 @@ async function loadSystemStats() {
     <div style="font-size:11px;color:var(--text3)">
       Mensaje más antiguo: ${fmtDate(s.oldest_message)} · Más reciente: ${fmtDate(s.newest_message)}
     </div>`;
+}
+
+async function systemMergeDuplicates() {
+  const pwd = document.getElementById('sys-pwd-seed')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña', 'error'); return; }
+  const el = document.getElementById('seed-result');
+  el.innerHTML = '<span style="color:var(--text3)">Buscando duplicados...</span>';
+  const res = await apiFetch('/system/merge-duplicates', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+  if (res?.ok) {
+    el.innerHTML = `<span style="color:var(--wa)">✅ ${res.message}</span>`;
+    notify(`✅ ${res.message}`);
+    await loadSystemStats();
+    await loadConversations();
+  } else {
+    el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
+    notify(res?.error || 'Error', 'error');
+  }
 }
 
 async function systemSeedMessages() {

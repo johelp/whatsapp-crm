@@ -237,11 +237,17 @@ async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pu
 async function processMessage(msg) {
   if (!msg.message || msg.key.fromMe) return;
 
-  const jid = msg.key.remoteJid;
-  if (!jid || jid.includes('broadcast') || jid.endsWith('@g.us')) return;
+  const rawJid = msg.key.remoteJid;
+  if (!rawJid || rawJid.includes('broadcast') || rawJid.endsWith('@g.us')) return;
 
-  const rawPhone = extractPhone(jid);
+  const rawPhone = extractPhone(rawJid);
   const phone = normalizePhone(rawPhone);
+
+  // Normalizar el JID: usar siempre el número normalizado (con 9 para Argentina)
+  // Esto evita que 543412824082 y 5493412824082 generen dos conversaciones distintas
+  const suffix = rawJid.includes('@lid') ? '@lid' : '@s.whatsapp.net';
+  const jid = rawJid.includes('@lid') ? rawJid : `${phone}${suffix}`;
+
   const { type, text } = getMessageText(msg);
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
 
@@ -382,14 +388,17 @@ async function connect() {
     for (const msg of msgs) {
       try {
         if (!msg.message || !msg.key?.remoteJid) continue;
-        const jid = msg.key.remoteJid;
-        if (jid.includes('broadcast') || jid.endsWith('@g.us')) continue;
+        const rawJid = msg.key.remoteJid;
+        if (rawJid.includes('broadcast') || rawJid.endsWith('@g.us')) continue;
 
         const { type, text } = getMessageText(msg);
         if (!text) continue;
 
-        const rawPhone = extractPhone(jid);
+        const rawPhone = extractPhone(rawJid);
         const phone = normalizePhone(rawPhone);
+        // Normalizar JID igual que en processMessage
+        const jid = rawJid.includes('@lid') ? rawJid : `${phone}@s.whatsapp.net`;
+
         const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
         const direction = msg.key.fromMe ? 'out' : 'in';
 
