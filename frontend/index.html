@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WhatsApp CRM</title>
+<title>WhatsApp CRM - Multiusuario 1 Sesion</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/css/app.css">
@@ -15,7 +15,7 @@
   <div class="sidebar-top">
     <div class="brand">
       <span class="brand-icon">💬</span>
-      <span class="brand-name">WA CRM</span>
+      <span class="brand-name">CRM pa'WA</span>
     </div>
     <div id="wa-pill" class="wa-status-pill disconnected" onclick="showPanel('settings')">
       <span class="wa-dot"></span>
@@ -73,10 +73,13 @@
         <div class="col-header-top">
           <h2>Conversaciones</h2>
           <div class="header-filters">
-            <button class="filter-btn active" data-status="all" onclick="setStatusFilter('all',this)">Todas</button>
-            <button class="filter-btn" data-status="open" onclick="setStatusFilter('open',this)">Abiertas</button>
-            <button class="filter-btn" data-status="pending" onclick="setStatusFilter('pending',this)">Pendientes</button>
-            <button class="filter-btn mine" onclick="toggleMineFilter(this)">Mis chats</button>
+            <select class="input filter-select" id="status-filter-sel" onchange="setStatusFromSelect(this)">
+              <option value="all">📋 Todas</option>
+              <option value="open">🟢 Abiertas</option>
+              <option value="pending">🟡 Pendientes</option>
+              <option value="resolved">⚫ Resueltas</option>
+            </select>
+            <button class="filter-btn mine" id="btn-mine" onclick="toggleMineFilter(this)">Mis chats</button>
           </div>
         </div>
         <div class="search-wrap">

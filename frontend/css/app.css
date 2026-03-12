@@ -1544,3 +1544,25 @@ textarea.input { resize: vertical; line-height: 1.5; }
 /* Prevenir autocomplete visual en buscadores */
 .search-input::-webkit-contacts-auto-fill-button,
 .search-input::-webkit-credentials-auto-fill-button { display: none !important; }
+
+/* ── Filter select dropdown ── */
+.filter-select {
+  padding: 4px 8px;
+  font-size: 11px;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface2);
+  color: var(--text2);
+  font-family: 'Sora', sans-serif;
+  cursor: pointer;
+  outline: none;
+  max-width: 140px;
+}
+.filter-select:focus { border-color: var(--wa); }
+
+.header-filters {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: nowrap;
+}

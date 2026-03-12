@@ -251,11 +251,26 @@ async function loadLabels() {
 }
 
 function renderLabelChips() {
-  const chips = S.labels.map(l =>
-    `<span class="lchip" data-id="${l.id}" style="color:${l.color};background:${l.color}18" onclick="toggleInboxLabel(${l.id},this)">${esc(l.name)}</span>`
-  ).join('');
-  document.getElementById('label-chips').innerHTML = chips;
-  document.getElementById('contacts-label-chips').innerHTML = chips.replace(/toggleInboxLabel/g, 'toggleContactsLabel');
+  // Dropdown de etiquetas en inbox
+  const sel = document.getElementById('label-filter-sel');
+  if (sel) {
+    sel.innerHTML = '<option value="">🏷 Todas las etiquetas</option>' +
+      S.labels.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
+    if (S.labelFilter.length) sel.value = S.labelFilter[0];
+  }
+  // Chips en panel contactos (puede no existir si no está en esa vista)
+  const contactsChips = document.getElementById('contacts-label-chips');
+  if (contactsChips) {
+    contactsChips.innerHTML = S.labels.map(l =>
+      `<span class="lchip" data-id="${l.id}" style="color:${l.color};background:${l.color}18" onclick="toggleContactsLabel(${l.id},this)">${esc(l.name)}</span>`
+    ).join('');
+  }
+}
+
+function setLabelFromSelect(sel) {
+  const val = parseInt(sel.value);
+  S.labelFilter = val ? [val] : [];
+  renderConversationList();
 }
 
 function toggleInboxLabel(id, el) {
@@ -368,7 +383,12 @@ function renderConversationList() {
 function setStatusFilter(status, el) {
   S.statusFilter = status;
   document.querySelectorAll('.filter-btn:not(.mine)').forEach(b => b.classList.remove('active'));
-  el.classList.add('active');
+  if (el) el.classList.add('active');
+  loadConversations();
+}
+
+function setStatusFromSelect(sel) {
+  S.statusFilter = sel.value;
   loadConversations();
 }
 
@@ -406,9 +426,14 @@ async function openChat(jid) {
   const name = conv?.contact_name || conv?.contact_phone || jid.split('@')[0];
   const phone = jid.split('@')[0];
 
+  // Header — usar pushName de WhatsApp si no hay nombre en CRM
+  const displayName = conv?.contact_name && conv.contact_name !== phone
+    ? conv.contact_name
+    : (conv?.wa_push_name || conv?.contact_phone || phone);
+
   // Header
-  document.getElementById('ch-avatar').textContent = name[0]?.toUpperCase() || '?';
-  document.getElementById('ch-name').textContent = name;
+  document.getElementById('ch-avatar').textContent = displayName[0]?.toUpperCase() || '?';
+  document.getElementById('ch-name').textContent = displayName;
   document.getElementById('ch-phone').textContent = `+${phone}`;
   document.getElementById('ch-company').textContent = conv?.company ? `· ${conv.company}` : '';
 
@@ -487,11 +512,15 @@ function renderViewingIndicator(jid) {
 
 function renderMessages(msgs) {
   const el = document.getElementById('messages-area');
-  if (!msgs.length) { el.innerHTML = '<div class="msg-date-sep">Sin mensajes aún</div>'; return; }
+  if (!msgs || !msgs.length) {
+    el.innerHTML = '<div class="msg-date-sep" style="opacity:0.5">Sin mensajes aún en el CRM — los nuevos mensajes aparecerán aquí</div>';
+    return;
+  }
 
   let lastDate = '';
   el.innerHTML = msgs.map(m => {
-    const d = new Date(m.timestamp);
+    const ts = typeof m.timestamp === 'number' ? m.timestamp : new Date(m.timestamp).getTime();
+    const d = new Date(ts);
     const dateStr = d.toLocaleDateString('es-AR', { weekday: 'long', day: 'numeric', month: 'long' });
     const sep = dateStr !== lastDate ? `<div class="msg-date-sep">${dateStr}</div>` : '';
     lastDate = dateStr;
@@ -499,9 +528,10 @@ function renderMessages(msgs) {
       ? `<span class="msg-agent" style="background:${m.sent_by_color || '#6366f1'}">${m.sent_by_name[0]}</span>`
       : '';
     const autoTag = m.is_auto_reply ? '<span class="msg-auto-tag">bot</span>' : '';
+    const content = m.content || '[archivo]';
     return `${sep}
     <div class="msg-wrap ${m.direction} ${m.is_auto_reply ? 'auto' : ''}">
-      <div class="msg-bubble">${esc(m.content)}</div>
+      <div class="msg-bubble">${esc(content)}</div>
       <div class="msg-meta">
         <span class="msg-time">${d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}</span>
         ${agentTag}${autoTag}
@@ -1642,11 +1672,22 @@ async function renderSettings() {
       <div id="users-list-settings"></div>
       <button class="btn-secondary btn-sm" style="margin-top:10px" onclick="openUserModal()">+ Agregar agente</button>
     </div>` : ''}
+
+    <!-- Agente IA (solo admin) -->
+    ${isAdmin ? `
+    <div class="settings-card full" id="ai-config-card">
+      <h3>🤖 Agente IA <span id="ai-status-pill" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surface2);color:var(--text3);font-weight:400;margin-left:8px">Cargando...</span></h3>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:14px">Respuestas automáticas inteligentes usando IA. Se activa fuera del horario laboral o cuando configurés.</p>
+      <div id="ai-config-form">Cargando configuración...</div>
+    </div>` : ''}
   `;
 
   renderQRListSettings();
   renderLabelsListSettings();
-  if (isAdmin) renderUsersListSettings();
+  if (isAdmin) {
+    renderUsersListSettings();
+    loadAIConfig();
+  }
 }
 
 function renderQRListSettings() {
@@ -1889,6 +1930,130 @@ function fmtTime(dt) {
 async function doLogout() {
   await apiFetch('/auth/logout', { method: 'POST' });
   window.location.href = '/login';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// AGENTE IA
+// ═══════════════════════════════════════════════════════════════
+
+async function loadAIConfig() {
+  const cfg = await apiFetch('/ai-config');
+  if (!cfg) return;
+
+  const pill = document.getElementById('ai-status-pill');
+  if (pill) {
+    pill.textContent = cfg.is_active ? '✅ Activo' : '⏸ Inactivo';
+    pill.style.background = cfg.is_active ? 'var(--wa-light)' : 'var(--surface2)';
+    pill.style.color = cfg.is_active ? 'var(--wa)' : 'var(--text3)';
+  }
+
+  const form = document.getElementById('ai-config-form');
+  if (!form) return;
+
+  form.innerHTML = `
+    <div style="display:grid;grid-template-columns:auto 1fr 1fr;gap:14px;align-items:end;margin-bottom:14px">
+      <div class="field">
+        <label>Estado</label>
+        <button class="toggle ${cfg.is_active ? 'on' : ''}" id="ai-toggle" onclick="this.classList.toggle('on')"></button>
+      </div>
+      <div class="field">
+        <label>Proveedor</label>
+        <select class="input" id="ai-provider" onchange="updateModelOptions(this.value)">
+          <option value="openai" ${cfg.provider==='openai'?'selected':''}>OpenAI</option>
+          <option value="anthropic" ${cfg.provider==='anthropic'?'selected':''}>Anthropic</option>
+          <option value="groq" ${cfg.provider==='groq'?'selected':''}>Groq (gratuito)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Modelo</label>
+        <input class="input" id="ai-model" value="${esc(cfg.model || 'gpt-4o-mini')}">
+      </div>
+    </div>
+
+    <div class="field" style="margin-bottom:12px">
+      <label>API Key ${cfg.api_key_set ? '(ya configurada — dejá vacío para no cambiarla)' : '(requerida)'}</label>
+      <input class="input mono" id="ai-apikey" type="password" placeholder="${cfg.api_key_set ? '••••••••••••••••' : 'sk-...' }">
+    </div>
+
+    <div class="form-row-2" style="margin-bottom:12px">
+      <div class="field">
+        <label>Nombre de la empresa</label>
+        <input class="input" id="ai-company" value="${esc(cfg.company_name || '')}">
+      </div>
+      <div class="field">
+        <label>Solo fuera de horario</label>
+        <select class="input" id="ai-only-outside">
+          <option value="1" ${cfg.only_outside_hours?'selected':''}>Sí — solo fuera de horario</option>
+          <option value="0" ${!cfg.only_outside_hours?'selected':''}>No — siempre activo</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="form-row-2" style="margin-bottom:12px">
+      <div class="field"><label>Hora inicio</label><input class="input" type="time" id="ai-h-start" value="${cfg.working_hours_start||'09:00'}"></div>
+      <div class="field"><label>Hora fin</label><input class="input" type="time" id="ai-h-end" value="${cfg.working_hours_end||'18:00'}"></div>
+    </div>
+
+    <div class="field" style="margin-bottom:12px">
+      <label>Contexto de la empresa (qué hace, qué ofrece, precios, FAQs)</label>
+      <textarea class="input" id="ai-context" rows="6" placeholder="Ej: Somos Snow Motion, escuela de esquí en Sierra Nevada. Ofrecemos clases para todos los niveles. Precios: clase grupal 45€, clase privada 80€. Los horarios son de 9:00 a 17:00...">${esc(cfg.company_context || '')}</textarea>
+      <p class="field-hint">Cuanto más detallado, mejor responderá la IA.</p>
+    </div>
+
+    <div class="field" style="margin-bottom:12px">
+      <label>Instrucciones adicionales / Restricciones</label>
+      <textarea class="input" id="ai-prompt" rows="3" placeholder="Ej: Nunca ofrezcas descuentos sin consultar. No confirmes reservas directamente. Si preguntan por precios grupales mayores a 10 personas, deriva al email info@...">${esc(cfg.system_prompt || '')}</textarea>
+    </div>
+
+    <div class="form-row-2" style="margin-bottom:14px">
+      <div class="field">
+        <label>Delay respuesta mín (seg)</label>
+        <input class="input" type="number" id="ai-delay-min" value="${cfg.response_delay_min||3}" min="1" max="30">
+      </div>
+      <div class="field">
+        <label>Delay respuesta máx (seg)</label>
+        <input class="input" type="number" id="ai-delay-max" value="${cfg.response_delay_max||8}" min="2" max="60">
+      </div>
+    </div>
+
+    <button class="btn-primary" onclick="saveAIConfig()">💾 Guardar configuración IA</button>
+  `;
+}
+
+function updateModelOptions(provider) {
+  const defaults = {
+    openai: 'gpt-4o-mini',
+    anthropic: 'claude-haiku-4-5',
+    groq: 'llama3-8b-8192',
+  };
+  document.getElementById('ai-model').value = defaults[provider] || '';
+}
+
+async function saveAIConfig() {
+  const body = {
+    is_active: document.getElementById('ai-toggle')?.classList.contains('on') ? 1 : 0,
+    provider:  document.getElementById('ai-provider')?.value,
+    model:     document.getElementById('ai-model')?.value,
+    api_key:   document.getElementById('ai-apikey')?.value || null,
+    company_name:    document.getElementById('ai-company')?.value,
+    company_context: document.getElementById('ai-context')?.value,
+    system_prompt:   document.getElementById('ai-prompt')?.value,
+    only_outside_hours: parseInt(document.getElementById('ai-only-outside')?.value),
+    working_hours_start: document.getElementById('ai-h-start')?.value,
+    working_hours_end:   document.getElementById('ai-h-end')?.value,
+    response_delay_min: parseInt(document.getElementById('ai-delay-min')?.value),
+    response_delay_max: parseInt(document.getElementById('ai-delay-max')?.value),
+    max_tokens: 400,
+    temperature: 0.7,
+  };
+
+  const res = await apiFetch('/ai-config', { method: 'PUT', body: JSON.stringify(body) });
+  if (res?.ok) {
+    notify('✅ Configuración IA guardada');
+    loadAIConfig(); // refrescar pill de estado
+  } else {
+    notify(res?.error || 'Error guardando', 'error');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
