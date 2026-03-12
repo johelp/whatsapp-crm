@@ -109,8 +109,17 @@ socket.on('message:new', async (data) => {
 });
 
 socket.on('message:sent', (data) => {
-  if (S.activeJid === data.jid) {
-    // Ya fue agregado en sendMsg(), no duplicar
+  // Si el chat está abierto y el mensaje lo envió OTRO agente (no yo), mostrarlo
+  if (S.activeJid === data.jid && data.sent_by !== S.me?.id) {
+    appendMessage({
+      direction: 'out',
+      content: data.content,
+      timestamp: data.timestamp,
+      sent_by: data.sent_by,
+      sent_by_name: data.sent_by_name,
+      sent_by_color: data.sent_by_color,
+      type: data.type || 'text',
+    });
   }
   loadConversations();
 });

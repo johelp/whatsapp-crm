@@ -376,7 +376,24 @@ async function sendMessage(phone, text, sentBy = null) {
     );
   }
 
-  if (io) io.emit('message:sent', { jid, content: text, timestamp: Date.now(), sent_by: sentBy });
+  if (io) {
+    // Obtener datos del agente para que otros lo puedan mostrar
+    let sentByName = null, sentByColor = null;
+    if (sentBy) {
+      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
+      sentByName = user?.display_name || null;
+      sentByColor = user?.color || null;
+    }
+    io.emit('message:sent', {
+      jid,
+      content: text,
+      timestamp: Date.now(),
+      sent_by: sentBy,
+      sent_by_name: sentByName,
+      sent_by_color: sentByColor,
+      type: 'text',
+    });
+  }
 
   return sent;
 }
@@ -419,7 +436,23 @@ async function sendFile(phone, filePath, mimeType, fileName, caption = '', sentB
     await query(`INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, datetime('now'))`, [jid, content]);
   }
 
-  if (io) io.emit('message:sent', { jid, content, timestamp: Date.now(), sent_by: sentBy });
+  if (io) {
+    let sentByName = null, sentByColor = null;
+    if (sentBy) {
+      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
+      sentByName = user?.display_name || null;
+      sentByColor = user?.color || null;
+    }
+    io.emit('message:sent', {
+      jid: normalizeJid(phone),
+      content,
+      timestamp: Date.now(),
+      sent_by: sentBy,
+      sent_by_name: sentByName,
+      sent_by_color: sentByColor,
+      type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage',
+    });
+  }
   return sent;
 }
 
