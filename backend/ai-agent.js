@@ -1,179 +1,175 @@
 /**
- * ai-agent.js — Agente de IA para respuestas automáticas inteligentes
- * Soporta: OpenAI, Anthropic, Groq
+ * ai-agent.js — Agente IA para WhatsApp CRM
+ * Proveedores: gemini (gratis), groq (gratis), openai, anthropic
+ * Contexto: texto libre + documentos cargados (ai_documents)
  */
 const { query, queryOne } = require('./db');
-
-// ─── Obtener config ───────────────────────────────────────────
 
 async function getAIConfig() {
   return await queryOne('SELECT * FROM ai_config LIMIT 1');
 }
 
-// ─── Verificar si debe responder ──────────────────────────────
-
-function isWorkingHours(config) {
-  if (!config.only_outside_hours) return false; // siempre activo
-
-  const now = new Date();
-  const day = now.getDay() || 7; // 1=Lun ... 7=Dom
-  const workingDays = (config.working_days || '1,2,3,4,5').split(',').map(Number);
-
-  if (!workingDays.includes(day)) return false; // día no laboral
-
-  const [startH, startM] = (config.working_hours_start || '09:00').split(':').map(Number);
-  const [endH, endM]     = (config.working_hours_end   || '18:00').split(':').map(Number);
-
-  const nowMin   = now.getHours() * 60 + now.getMinutes();
-  const startMin = startH * 60 + startM;
-  const endMin   = endH   * 60 + endM;
-
-  return nowMin >= startMin && nowMin < endMin; // true = horario laboral
+async function getDocumentContext() {
+  try {
+    const docs = await query(
+      `SELECT name, content FROM ai_documents WHERE is_active = 1 ORDER BY created_at DESC LIMIT 5`
+    );
+    if (!docs.length) return '';
+    return docs.map(d => `[${d.name}]\n${d.content}`).join('\n\n---\n\n');
+  } catch(e) { return ''; }
 }
 
-// ─── Construir system prompt ──────────────────────────────────
+function isWorkingHours(config) {
+  if (!config.only_outside_hours) return false;
+  const now = new Date();
+  const day = now.getDay() || 7;
+  const workingDays = (config.working_days || '1,2,3,4,5').split(',').map(Number);
+  if (!workingDays.includes(day)) return false;
+  const [sH, sM] = (config.working_hours_start || '09:00').split(':').map(Number);
+  const [eH, eM] = (config.working_hours_end   || '18:00').split(':').map(Number);
+  const t = now.getHours() * 60 + now.getMinutes();
+  return t >= (sH * 60 + sM) && t < (eH * 60 + eM);
+}
 
-function buildSystemPrompt(config) {
-  const lines = [];
-
-  lines.push(`Sos el asistente virtual de ${config.company_name || 'la empresa'}.`);
-  lines.push('Respondés mensajes de WhatsApp de forma amigable, clara y concisa.');
-  lines.push('Nunca uses markdown, asteriscos ni emojis en exceso.');
-  lines.push('Si no sabés algo, decí que lo vas a consultar con el equipo.');
-
-  if (config.company_context) {
-    lines.push('\n--- INFORMACIÓN DE LA EMPRESA ---');
-    lines.push(config.company_context);
+async function buildSystemPrompt(config) {
+  const lines = [
+    `Sos el asistente virtual de ${config.company_name || 'la empresa'}.`,
+    'Respondés mensajes de WhatsApp de forma amigable, clara y concisa.',
+    'Nunca uses markdown ni asteriscos. Máximo 3 oraciones por respuesta.',
+    'Si no sabés algo, decí que lo van a consultar y se comunicarán pronto.',
+  ];
+  if (config.company_context?.trim()) {
+    lines.push('\n--- INFORMACIÓN DE LA EMPRESA ---\n' + config.company_context.trim());
   }
-
-  if (config.system_prompt) {
-    lines.push('\n--- INSTRUCCIONES ADICIONALES ---');
-    lines.push(config.system_prompt);
+  const docCtx = await getDocumentContext();
+  if (docCtx) lines.push('\n--- DOCUMENTOS DE REFERENCIA ---\n' + docCtx);
+  if (config.system_prompt?.trim()) {
+    lines.push('\n--- INSTRUCCIONES ADICIONALES ---\n' + config.system_prompt.trim());
   }
-
   return lines.join('\n');
 }
 
-// ─── Obtener historial para contexto ─────────────────────────
-
-async function getConversationContext(jid, limit = 10) {
+async function getConversationContext(jid, limit = 8) {
   const msgs = await query(
-    'SELECT direction, content FROM messages WHERE jid = ? ORDER BY timestamp DESC LIMIT ?',
+    `SELECT direction, content FROM messages
+     WHERE jid = ? AND content IS NOT NULL AND content != ''
+     ORDER BY timestamp DESC LIMIT ?`,
     [jid, limit]
   );
   return msgs.reverse().map(m => ({
     role: m.direction === 'in' ? 'user' : 'assistant',
-    content: m.content || '',
+    content: m.content,
   }));
 }
 
-// ─── Llamar al proveedor ──────────────────────────────────────
+// ── Proveedores ──────────────────────────────────────────────
 
-async function callProvider(config, messages, systemPrompt) {
-  const provider = config.provider || 'openai';
-  const apiKey   = config.api_key;
-  const model    = config.model || 'gpt-4o-mini';
-  const maxTok   = config.max_tokens || 300;
-  const temp     = config.temperature ?? 0.7;
-
-  if (!apiKey) throw new Error('API key no configurada');
-
-  if (provider === 'openai' || provider === 'groq') {
-    const baseUrl = provider === 'groq'
-      ? 'https://api.groq.com/openai/v1'
-      : 'https://api.openai.com/v1';
-
-    const res = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          ...messages,
-        ],
-        max_tokens: maxTok,
-        temperature: temp,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`${provider} API error: ${err}`);
-    }
-
-    const data = await res.json();
-    return data.choices?.[0]?.message?.content?.trim() || null;
-  }
-
-  if (provider === 'anthropic') {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: model || 'claude-haiku-4-5',
-        system: systemPrompt,
-        messages,
-        max_tokens: maxTok,
-      }),
-    });
-
-    if (!res.ok) {
-      const err = await res.text();
-      throw new Error(`Anthropic API error: ${err}`);
-    }
-
-    const data = await res.json();
-    return data.content?.[0]?.text?.trim() || null;
-  }
-
-  throw new Error(`Proveedor no soportado: ${provider}`);
+async function callGemini(config, messages, systemPrompt) {
+  const model = config.model || 'gemini-1.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.api_key}`;
+  const contents = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }));
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contents,
+      generationConfig: { maxOutputTokens: config.max_tokens || 300, temperature: config.temperature ?? 0.7 },
+    }),
+  });
+  if (!res.ok) throw new Error(`Gemini ${res.status}: ${(await res.text()).substring(0,200)}`);
+  const d = await res.json();
+  return d.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
 }
 
-// ─── Función principal ────────────────────────────────────────
+async function callGroq(config, messages, systemPrompt) {
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.api_key}` },
+    body: JSON.stringify({
+      model: config.model || 'llama3-8b-8192',
+      messages: [{ role: 'system', content: systemPrompt }, ...messages],
+      max_tokens: config.max_tokens || 300,
+      temperature: config.temperature ?? 0.7,
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}: ${(await res.text()).substring(0,200)}`);
+  const d = await res.json();
+  return d.choices?.[0]?.message?.content?.trim() || null;
+}
+
+async function callOpenAI(config, messages, systemPrompt) {
+  const res = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.api_key}` },
+    body: JSON.stringify({
+      model: config.model || 'gpt-4o-mini',
+      messages: [{ role: 'system', content: systemPrompt }, ...messages],
+      max_tokens: config.max_tokens || 300,
+      temperature: config.temperature ?? 0.7,
+    }),
+  });
+  if (!res.ok) throw new Error(`OpenAI ${res.status}: ${(await res.text()).substring(0,200)}`);
+  const d = await res.json();
+  return d.choices?.[0]?.message?.content?.trim() || null;
+}
+
+async function callAnthropic(config, messages, systemPrompt) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': config.api_key, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: config.model || 'claude-haiku-4-5',
+      system: systemPrompt,
+      messages,
+      max_tokens: config.max_tokens || 300,
+    }),
+  });
+  if (!res.ok) throw new Error(`Anthropic ${res.status}: ${(await res.text()).substring(0,200)}`);
+  const d = await res.json();
+  return d.content?.[0]?.text?.trim() || null;
+}
+
+async function callProvider(config, messages, systemPrompt) {
+  if (!config.api_key) throw new Error('API key no configurada');
+  switch (config.provider) {
+    case 'gemini':    return callGemini(config, messages, systemPrompt);
+    case 'groq':      return callGroq(config, messages, systemPrompt);
+    case 'openai':    return callOpenAI(config, messages, systemPrompt);
+    case 'anthropic': return callAnthropic(config, messages, systemPrompt);
+    default: throw new Error(`Proveedor desconocido: ${config.provider}`);
+  }
+}
 
 async function runAIAgent(jid, incomingText, sendMessageFn) {
   try {
     const config = await getAIConfig();
     if (!config?.is_active) return false;
-
-    // Si estamos en horario laboral y el config dice solo fuera de horario → no responder
     if (config.only_outside_hours && isWorkingHours(config)) return false;
+    const conv = await queryOne('SELECT ai_disabled FROM conversations WHERE jid = ?', [jid]);
+    if (conv?.ai_disabled) return false;
 
-    const systemPrompt = buildSystemPrompt(config);
-    const history      = await getConversationContext(jid, 10);
-
-    // Agregar el mensaje actual si no está en el historial
-    const lastMsg = history[history.length - 1];
-    if (!lastMsg || lastMsg.content !== incomingText) {
+    const systemPrompt = await buildSystemPrompt(config);
+    const history      = await getConversationContext(jid, 8);
+    if (!history.length || history[history.length-1].content !== incomingText) {
       history.push({ role: 'user', content: incomingText });
     }
 
-    // Delay humanizado
-    const delayMin = (config.response_delay_min || 3) * 1000;
-    const delayMax = (config.response_delay_max || 8) * 1000;
-    const delay    = delayMin + Math.random() * (delayMax - delayMin);
-    await new Promise(r => setTimeout(r, delay));
+    const dMin = (config.response_delay_min || 3) * 1000;
+    const dMax = (config.response_delay_max || 8) * 1000;
+    await new Promise(r => setTimeout(r, dMin + Math.random() * (dMax - dMin)));
 
     const response = await callProvider(config, history, systemPrompt);
     if (!response) return false;
 
-    // Enviar respuesta
-    const phone = jid.split('@')[0];
-    await sendMessageFn(phone, response, null); // sent_by = null = bot IA
-
-    console.log(`[AI] Respondió a ${phone}: ${response.substring(0, 60)}...`);
+    await sendMessageFn(jid.split('@')[0], response, null);
+    console.log(`[AI:${config.provider}] → ${jid.split('@')[0]}: ${response.substring(0,80)}`);
     return true;
-
-  } catch (e) {
-    console.error('[AI] Error en agente IA:', e.message);
+  } catch(e) {
+    console.error('[AI Agent] Error:', e.message);
     return false;
   }
 }

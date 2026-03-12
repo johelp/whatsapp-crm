@@ -1830,21 +1830,26 @@ function openUserModal(id) {
   document.getElementById('usr-password').value = '';
   document.getElementById('usr-color').value = u?.color || '#6366f1';
   document.getElementById('usr-role').value = u?.role || 'agent';
+  // is_active: null se trata como activo para usuarios existentes, 1 para nuevos
+  document.getElementById('usr-active').value = (u && u.is_active === 0) ? '0' : '1';
   openModal('modal-user');
 }
 
 async function saveUser() {
   const id = document.getElementById('usr-id').value;
   const body = {
-    username: document.getElementById('usr-username').value,
+    username:     document.getElementById('usr-username').value,
     display_name: document.getElementById('usr-display').value,
-    password: document.getElementById('usr-password').value || undefined,
-    color: document.getElementById('usr-color').value,
-    role: document.getElementById('usr-role').value,
+    password:     document.getElementById('usr-password').value || undefined,
+    color:        document.getElementById('usr-color').value,
+    role:         document.getElementById('usr-role').value,
+    is_active:    parseInt(document.getElementById('usr-active').value),
   };
   if (!id && !body.password) { notify('La contraseña es obligatoria para nuevos agentes', 'error'); return; }
-  if (id) await apiFetch(`/users/${id}`, { method: 'PUT', body: JSON.stringify(body) });
-  else await apiFetch('/users', { method: 'POST', body: JSON.stringify(body) });
+  const res = id
+    ? await apiFetch(`/users/${id}`, { method: 'PUT', body: JSON.stringify(body) })
+    : await apiFetch('/users', { method: 'POST', body: JSON.stringify(body) });
+  if (res?.ok === false || res?.error) { notify(res?.error || 'Error guardando', 'error'); return; }
   closeModal('modal-user');
   await loadUsers();
   renderUsersListSettings();
@@ -1937,8 +1942,8 @@ async function doLogout() {
 // ═══════════════════════════════════════════════════════════════
 
 async function loadAIConfig() {
-  const cfg = await apiFetch('/ai-config');
-  if (!cfg) return;
+  const cfg = await apiFetch('/ai-config') || {};
+  const docs = await apiFetch('/ai-documents') || [];
 
   const pill = document.getElementById('ai-status-pill');
   if (pill) {
@@ -1950,7 +1955,33 @@ async function loadAIConfig() {
   const form = document.getElementById('ai-config-form');
   if (!form) return;
 
+  const MODELS = {
+    gemini:    ['gemini-1.5-flash (gratis)', 'gemini-1.5-pro', 'gemini-2.0-flash'],
+    groq:      ['llama3-8b-8192 (gratis)', 'llama3-70b-8192 (gratis)', 'mixtral-8x7b-32768 (gratis)'],
+    openai:    ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'],
+    anthropic: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'],
+  };
+  const MODEL_VALUES = {
+    gemini:    ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'],
+    groq:      ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768'],
+    openai:    ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'],
+    anthropic: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'],
+  };
+
+  const prov = cfg.provider || 'gemini';
+  const modelOptions = (MODEL_VALUES[prov] || []).map((v, i) =>
+    `<option value="${v}" ${cfg.model === v ? 'selected' : ''}>${MODELS[prov][i]}</option>`
+  ).join('');
+
+  const FREE_BADGE = '<span style="font-size:10px;background:#dcfce7;color:#16a34a;padding:1px 6px;border-radius:10px;margin-left:4px">GRATIS</span>';
+
   form.innerHTML = `
+    <div style="background:var(--blue-light);border:1px solid #bfdbfe;border-radius:var(--radius);padding:10px 14px;margin-bottom:16px;font-size:12px;color:#1e40af">
+      💡 <b>Gemini</b> y <b>Groq</b> tienen planes gratuitos generosos para empezar.
+      Gemini: <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> ·
+      Groq: <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a>
+    </div>
+
     <div style="display:grid;grid-template-columns:auto 1fr 1fr;gap:14px;align-items:end;margin-bottom:14px">
       <div class="field">
         <label>Estado</label>
@@ -1958,21 +1989,22 @@ async function loadAIConfig() {
       </div>
       <div class="field">
         <label>Proveedor</label>
-        <select class="input" id="ai-provider" onchange="updateModelOptions(this.value)">
-          <option value="openai" ${cfg.provider==='openai'?'selected':''}>OpenAI</option>
-          <option value="anthropic" ${cfg.provider==='anthropic'?'selected':''}>Anthropic</option>
-          <option value="groq" ${cfg.provider==='groq'?'selected':''}>Groq (gratuito)</option>
+        <select class="input" id="ai-provider" onchange="updateAIModels(this.value)">
+          <option value="gemini"    ${prov==='gemini'?'selected':''}>Google Gemini ${FREE_BADGE}</option>
+          <option value="groq"      ${prov==='groq'?'selected':''}>Groq ${FREE_BADGE}</option>
+          <option value="openai"    ${prov==='openai'?'selected':''}>OpenAI</option>
+          <option value="anthropic" ${prov==='anthropic'?'selected':''}>Anthropic</option>
         </select>
       </div>
       <div class="field">
         <label>Modelo</label>
-        <input class="input" id="ai-model" value="${esc(cfg.model || 'gpt-4o-mini')}">
+        <select class="input" id="ai-model">${modelOptions}</select>
       </div>
     </div>
 
     <div class="field" style="margin-bottom:12px">
-      <label>API Key ${cfg.api_key_set ? '(ya configurada — dejá vacío para no cambiarla)' : '(requerida)'}</label>
-      <input class="input mono" id="ai-apikey" type="password" placeholder="${cfg.api_key_set ? '••••••••••••••••' : 'sk-...' }">
+      <label>API Key ${cfg.api_key_set ? '<span style="color:var(--wa);font-size:11px">✓ configurada</span>' : '<span style="color:var(--amber);font-size:11px">requerida</span>'}</label>
+      <input class="input mono" id="ai-apikey" type="password" placeholder="${cfg.api_key_set ? 'Dejá vacío para mantener la actual' : 'Pegá tu API key aquí'}">
     </div>
 
     <div class="form-row-2" style="margin-bottom:12px">
@@ -1981,10 +2013,10 @@ async function loadAIConfig() {
         <input class="input" id="ai-company" value="${esc(cfg.company_name || '')}">
       </div>
       <div class="field">
-        <label>Solo fuera de horario</label>
+        <label>Activación</label>
         <select class="input" id="ai-only-outside">
-          <option value="1" ${cfg.only_outside_hours?'selected':''}>Sí — solo fuera de horario</option>
-          <option value="0" ${!cfg.only_outside_hours?'selected':''}>No — siempre activo</option>
+          <option value="1" ${cfg.only_outside_hours !== 0 ? 'selected' : ''}>Solo fuera de horario</option>
+          <option value="0" ${cfg.only_outside_hours === 0 ? 'selected' : ''}>Siempre activo</option>
         </select>
       </div>
     </div>
@@ -1995,38 +2027,122 @@ async function loadAIConfig() {
     </div>
 
     <div class="field" style="margin-bottom:12px">
-      <label>Contexto de la empresa (qué hace, qué ofrece, precios, FAQs)</label>
-      <textarea class="input" id="ai-context" rows="6" placeholder="Ej: Somos Snow Motion, escuela de esquí en Sierra Nevada. Ofrecemos clases para todos los niveles. Precios: clase grupal 45€, clase privada 80€. Los horarios son de 9:00 a 17:00...">${esc(cfg.company_context || '')}</textarea>
-      <p class="field-hint">Cuanto más detallado, mejor responderá la IA.</p>
+      <label>Contexto de la empresa</label>
+      <textarea class="input" id="ai-context" rows="5" placeholder="Ej: Somos Turismo Patagonia. Ofrecemos excursiones a glaciares, trekking y pesca. Precios: excursión glaciar $150USD, trekking $80USD. Atendemos de lunes a sábado 8-18hs...">${esc(cfg.company_context || '')}</textarea>
+      <p class="field-hint">Cuanto más detallado, mejor responderá. Podés completar con documentos abajo.</p>
     </div>
 
-    <div class="field" style="margin-bottom:12px">
-      <label>Instrucciones adicionales / Restricciones</label>
-      <textarea class="input" id="ai-prompt" rows="3" placeholder="Ej: Nunca ofrezcas descuentos sin consultar. No confirmes reservas directamente. Si preguntan por precios grupales mayores a 10 personas, deriva al email info@...">${esc(cfg.system_prompt || '')}</textarea>
+    <div class="field" style="margin-bottom:16px">
+      <label>Instrucciones / Restricciones</label>
+      <textarea class="input" id="ai-prompt" rows="2" placeholder="Ej: Nunca confirmes reservas directamente. Si preguntan por grupos +10, derivá al email...">${esc(cfg.system_prompt || '')}</textarea>
     </div>
 
-    <div class="form-row-2" style="margin-bottom:14px">
-      <div class="field">
-        <label>Delay respuesta mín (seg)</label>
-        <input class="input" type="number" id="ai-delay-min" value="${cfg.response_delay_min||3}" min="1" max="30">
+    <div class="form-row-2" style="margin-bottom:16px">
+      <div class="field"><label>Delay mín (seg)</label><input class="input" type="number" id="ai-delay-min" value="${cfg.response_delay_min||3}" min="1" max="30"></div>
+      <div class="field"><label>Delay máx (seg)</label><input class="input" type="number" id="ai-delay-max" value="${cfg.response_delay_max||8}" min="2" max="60"></div>
+    </div>
+
+    <button class="btn-primary" onclick="saveAIConfig()" style="margin-bottom:24px">💾 Guardar configuración IA</button>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin-bottom:20px">
+
+    <h4 style="margin-bottom:4px">📄 Documentos de contexto</h4>
+    <p style="font-size:12px;color:var(--text3);margin-bottom:14px">Subí PDFs o archivos de texto con información del negocio. La IA los usará como referencia.</p>
+
+    <div id="ai-docs-list" style="margin-bottom:14px">${renderAIDocsList(docs)}</div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+      <div class="field" style="flex:1;min-width:160px">
+        <label>Nombre del documento</label>
+        <input class="input" id="ai-doc-name" placeholder="Ej: Tarifario 2025">
       </div>
-      <div class="field">
-        <label>Delay respuesta máx (seg)</label>
-        <input class="input" type="number" id="ai-delay-max" value="${cfg.response_delay_max||8}" min="2" max="60">
+      <div class="field" style="flex:1;min-width:160px">
+        <label>Archivo (PDF o .txt)</label>
+        <input class="input" type="file" id="ai-doc-file" accept=".pdf,.txt,.md" style="padding:4px">
       </div>
+      <button class="btn-secondary" onclick="uploadAIDocument()" style="white-space:nowrap">📤 Subir</button>
     </div>
 
-    <button class="btn-primary" onclick="saveAIConfig()">💾 Guardar configuración IA</button>
+    <div class="field" style="margin-top:12px">
+      <label>O pegar texto directamente</label>
+      <textarea class="input" id="ai-doc-text" rows="3" placeholder="Pegá aquí preguntas frecuentes, políticas, horarios, etc."></textarea>
+      <button class="btn-secondary btn-sm" style="margin-top:6px" onclick="uploadAIDocumentText()">💾 Guardar texto</button>
+    </div>
   `;
 }
 
-function updateModelOptions(provider) {
-  const defaults = {
-    openai: 'gpt-4o-mini',
-    anthropic: 'claude-haiku-4-5',
-    groq: 'llama3-8b-8192',
+function renderAIDocsList(docs) {
+  if (!docs.length) return '<p style="font-size:12px;color:var(--text3)">No hay documentos cargados aún.</p>';
+  return docs.map(d => `
+    <div class="setting-item">
+      <div class="setting-item-info">
+        <div class="setting-item-name">${esc(d.name)} <span style="font-size:10px;color:var(--text3)">${d.file_type?.toUpperCase()}</span></div>
+        <div class="setting-item-sub">${Math.round((d.size||0)/1024)}KB · ${d.is_active ? '✅ activo' : '⏸ inactivo'}</div>
+      </div>
+      <button class="btn-icon-sm" onclick="toggleAIDoc(${d.id})" title="${d.is_active ? 'Desactivar' : 'Activar'}">${d.is_active ? '✅' : '⏸'}</button>
+      <button class="btn-icon-sm" onclick="deleteAIDoc(${d.id})" title="Eliminar">🗑</button>
+    </div>`).join('');
+}
+
+function updateAIModels(provider) {
+  const MODEL_VALUES = {
+    gemini:    ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'],
+    groq:      ['llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768'],
+    openai:    ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'],
+    anthropic: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'],
   };
-  document.getElementById('ai-model').value = defaults[provider] || '';
+  const MODELS = {
+    gemini:    ['gemini-1.5-flash (gratis)', 'gemini-1.5-pro', 'gemini-2.0-flash'],
+    groq:      ['llama3-8b-8192 (gratis)', 'llama3-70b-8192 (gratis)', 'mixtral-8x7b-32768 (gratis)'],
+    openai:    ['gpt-4o-mini', 'gpt-4o', 'gpt-3.5-turbo'],
+    anthropic: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-5'],
+  };
+  const sel = document.getElementById('ai-model');
+  if (!sel) return;
+  sel.innerHTML = (MODEL_VALUES[provider] || []).map((v, i) =>
+    `<option value="${v}">${MODELS[provider][i]}</option>`
+  ).join('');
+}
+
+// Mantener updateModelOptions como alias para compatibilidad
+function updateModelOptions(provider) { updateAIModels(provider); }
+
+async function uploadAIDocument() {
+  const name = document.getElementById('ai-doc-name')?.value?.trim();
+  const fileInput = document.getElementById('ai-doc-file');
+  const file = fileInput?.files?.[0];
+  if (!file) { notify('Seleccioná un archivo primero', 'error'); return; }
+  const fd = new FormData();
+  fd.append('name', name || file.name);
+  fd.append('file', file);
+  const res = await fetch('/api/ai-documents', { method: 'POST', body: fd });
+  const data = await res.json();
+  if (data.ok) { notify('✅ Documento cargado'); loadAIConfig(); }
+  else notify(data.error || 'Error', 'error');
+}
+
+async function uploadAIDocumentText() {
+  const name = document.getElementById('ai-doc-name')?.value?.trim();
+  const text = document.getElementById('ai-doc-text')?.value?.trim();
+  if (!name) { notify('Escribí un nombre para el documento', 'error'); return; }
+  if (!text) { notify('El texto está vacío', 'error'); return; }
+  const res = await apiFetch('/ai-documents', {
+    method: 'POST',
+    body: JSON.stringify({ name, text_content: text }),
+  });
+  if (res?.ok) { notify('✅ Texto guardado'); loadAIConfig(); }
+  else notify(res?.error || 'Error', 'error');
+}
+
+async function toggleAIDoc(id) {
+  await apiFetch(`/ai-documents/${id}/toggle`, { method: 'PUT', body: '{}' });
+  loadAIConfig();
+}
+
+async function deleteAIDoc(id) {
+  if (!confirm('¿Eliminar este documento?')) return;
+  await apiFetch(`/ai-documents/${id}`, { method: 'DELETE' });
+  loadAIConfig();
 }
 
 async function saveAIConfig() {

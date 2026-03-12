@@ -380,8 +380,16 @@ async function runMigrations() {
   const migrations = [
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
-    // Asegurar que message_id tiene un índice único para ON CONFLICT funcione
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
+    `CREATE TABLE IF NOT EXISTS ai_documents (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      content TEXT NOT NULL,
+      file_type TEXT DEFAULT 'text',
+      size INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
   ];
   for (const sql of migrations) {
     try { await query(sql); } catch(e) { console.log('Migration skip:', e.message.substring(0,60)); }

@@ -87,12 +87,15 @@ router.post('/users', requireAuth, requireAdmin, async (req, res) => {
 
 router.put('/users/:id', requireAuth, requireAdmin, async (req, res) => {
   const { display_name, role, color, is_active, password } = req.body;
+  if (parseInt(req.params.id) === req.session.user.id && is_active === 0) {
+    return res.status(400).json({ error: 'No podés desactivarte a vos mismo' });
+  }
   if (password) {
     const hash = await bcrypt.hash(password, 10);
     await query('UPDATE users SET password_hash = ? WHERE id = ?', [hash, req.params.id]);
   }
   await query('UPDATE users SET display_name = ?, role = ?, color = ?, is_active = ? WHERE id = ?',
-    [display_name, role, color, is_active, req.params.id]);
+    [display_name, role, color, is_active != null ? (is_active ? 1 : 0) : 1, req.params.id]);
   res.json({ ok: true });
 });
 
@@ -664,6 +667,68 @@ router.put('/ai-config', requireAuth, requireAdmin, async (req, res) => {
        working_hours_start||'09:00', working_hours_end||'18:00', working_days||'1,2,3,4,5']
     );
   }
+  res.json({ ok: true });
+});
+
+// ─── AI Documents ─────────────────────────────────────────────────────────────
+
+router.get('/ai-documents', requireAuth, requireAdmin, async (req, res) => {
+  const docs = await query('SELECT id, name, file_type, size, is_active, created_at FROM ai_documents ORDER BY created_at DESC');
+  res.json(docs);
+});
+
+router.post('/ai-documents', requireAuth, requireAdmin, upload.single('file'), async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!req.file && !req.body.text_content) return res.status(400).json({ error: 'Falta archivo o texto' });
+
+    let content = '';
+    let fileType = 'text';
+    let size = 0;
+
+    if (req.file) {
+      fileType = req.file.mimetype.includes('pdf') ? 'pdf' : 'text';
+      size = req.file.size;
+
+      if (fileType === 'pdf') {
+        try {
+          const pdfParse = require('pdf-parse');
+          const data = await pdfParse(req.file.buffer);
+          content = data.text.replace(/\s+/g, ' ').trim();
+        } catch(e) {
+          return res.status(400).json({ error: 'No se pudo leer el PDF: ' + e.message });
+        }
+      } else {
+        content = req.file.buffer.toString('utf-8');
+      }
+    } else {
+      content = req.body.text_content;
+      size = content.length;
+    }
+
+    // Truncar a 50.000 caracteres para no explotar el contexto
+    if (content.length > 50000) content = content.substring(0, 50000) + '\n[... documento truncado ...]';
+
+    await query(
+      `INSERT INTO ai_documents (name, content, file_type, size) VALUES (?, ?, ?, ?)`,
+      [name || req.file?.originalname || 'Documento', content, fileType, size]
+    );
+    res.json({ ok: true });
+  } catch(e) {
+    console.error('Error subiendo documento IA:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.put('/ai-documents/:id/toggle', requireAuth, requireAdmin, async (req, res) => {
+  const doc = await queryOne('SELECT is_active FROM ai_documents WHERE id = ?', [req.params.id]);
+  if (!doc) return res.status(404).json({ error: 'No encontrado' });
+  await query('UPDATE ai_documents SET is_active = ? WHERE id = ?', [doc.is_active ? 0 : 1, req.params.id]);
+  res.json({ ok: true });
+});
+
+router.delete('/ai-documents/:id', requireAuth, requireAdmin, async (req, res) => {
+  await query('DELETE FROM ai_documents WHERE id = ?', [req.params.id]);
   res.json({ ok: true });
 });
 

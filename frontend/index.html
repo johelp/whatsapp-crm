@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WhatsApp CRM - Multiusuario 1 Sesion</title>
+<title>WhatsApp CRM</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/css/app.css">
@@ -15,7 +15,7 @@
   <div class="sidebar-top">
     <div class="brand">
       <span class="brand-icon">💬</span>
-      <span class="brand-name">CRM pa'WA</span>
+      <span class="brand-name">WA CRM</span>
     </div>
     <div id="wa-pill" class="wa-status-pill disconnected" onclick="showPanel('settings')">
       <span class="wa-dot"></span>
@@ -533,12 +533,21 @@
         <div class="field"><label>Contraseña</label><input class="input" type="password" id="usr-password" placeholder="mínimo 6 caracteres"></div>
         <div class="field"><label>Color</label><input class="input" type="color" id="usr-color" value="#6366f1"></div>
       </div>
-      <div class="field">
-        <label>Rol</label>
-        <select class="input" id="usr-role">
-          <option value="agent">Agente</option>
-          <option value="admin">Administrador</option>
-        </select>
+      <div class="form-row-2">
+        <div class="field">
+          <label>Rol</label>
+          <select class="input" id="usr-role">
+            <option value="agent">Agente</option>
+            <option value="admin">Administrador</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Estado</label>
+          <select class="input" id="usr-active">
+            <option value="1">✅ Activo</option>
+            <option value="0">⛔ Desactivado</option>
+          </select>
+        </div>
       </div>
     </div>
     <div class="modal-footer">
