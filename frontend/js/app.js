@@ -126,6 +126,11 @@ socket.on('message:sent', (data) => {
 
 socket.on('users:online', (users) => renderOnlineAgents(users));
 
+socket.on('history:synced', ({ count }) => {
+  notify(`📥 ${count} mensajes históricos importados desde el móvil`);
+  loadConversations();
+});
+
 socket.on('typing:remote', ({ jid, user }) => {
   if (S.activeJid !== jid) return;
   showRemoteTyping(`${user.display_name} está escribiendo...`);

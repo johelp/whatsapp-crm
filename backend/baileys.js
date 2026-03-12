@@ -185,6 +185,26 @@ async function saveMessage({ message_id, jid, direction, type, content, timestam
   } catch(e) { /* mensaje duplicado, ignorar */ }
 }
 
+async function upsertConversationHistory(jid, contactId, lastMessage, lastMessageAt, direction) {
+  const existing = await queryOne('SELECT id, last_message_at FROM conversations WHERE jid = ?', [jid]);
+  if (existing) {
+    // Solo actualizar last_message si este mensaje es más reciente
+    await query(
+      `UPDATE conversations SET
+        contact_id = COALESCE(contact_id, ?),
+        last_message = CASE WHEN last_message_at < ? THEN ? ELSE last_message END,
+        last_message_at = CASE WHEN last_message_at < ? THEN ? ELSE last_message_at END
+       WHERE jid = ?`,
+      [contactId || null, lastMessageAt, lastMessage, lastMessageAt, lastMessageAt, jid]
+    );
+  } else {
+    await query(
+      `INSERT INTO conversations (jid, contact_id, last_message, last_message_at, unread_count) VALUES (?, ?, ?, ?, 0)`,
+      [jid, contactId || null, lastMessage, lastMessageAt]
+    );
+  }
+}
+
 async function upsertConversation(jid, contactId, lastMessage, lastMessageAt) {
   const existing = await queryOne('SELECT id, unread_count FROM conversations WHERE jid = ?', [jid]);
   if (existing) {
@@ -224,16 +244,29 @@ async function processMessage(msg) {
   let contact = await findContactByPhone(phone);
 
   if (!contact) {
-    // Crear contacto nuevo con número normalizado
-    await query(
-      'INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)',
-      [phone, msg.pushName || phone]
-    );
-    contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+    // Crear contacto nuevo — usar RETURNING para PostgreSQL
+    try {
+      const rows = await query(
+        'INSERT INTO contacts (phone, name) VALUES (?, ?) ON CONFLICT (phone) DO UPDATE SET name = COALESCE(contacts.name, EXCLUDED.name) RETURNING id, name, phone',
+        [phone, msg.pushName || phone]
+      );
+      contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+    } catch (e) {
+      // Fallback SQLite
+      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName || phone]);
+      contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+    }
   } else if (!contact.name && msg.pushName) {
-    // Actualizar nombre si estaba vacío
     await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
     contact.name = msg.pushName;
+  }
+
+  // Actualizar contact_id en conversación si faltaba
+  if (contact?.id) {
+    await query(
+      'UPDATE conversations SET contact_id = ? WHERE jid = ? AND contact_id IS NULL',
+      [contact.id, jid]
+    ).catch(() => {});
   }
 
   // Guardar mensaje usando JID original de WhatsApp
@@ -292,7 +325,7 @@ async function connect() {
     printQRInTerminal: false,
     browser: ['WhatsApp CRM', 'Chrome', '121.0'],
     generateHighQualityLinkPreview: false,
-    syncFullHistory: false,
+    syncFullHistory: true,   // solicitar historial al móvil
     markOnlineOnConnect: false,
   });
 
@@ -329,6 +362,56 @@ async function connect() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  // Historial sincronizado desde el móvil
+  sock.ev.on('messaging-history.set', async ({ messages: msgs, isLatest }) => {
+    console.log(`Sincronizando historial: ${msgs.length} mensajes (isLatest: ${isLatest})`);
+    let imported = 0;
+    for (const msg of msgs) {
+      try {
+        if (!msg.message || !msg.key?.remoteJid) continue;
+        const jid = msg.key.remoteJid;
+        if (jid.includes('broadcast') || jid.endsWith('@g.us')) continue;
+
+        const { type, text } = getMessageText(msg);
+        if (!text) continue;
+
+        const rawPhone = extractPhone(jid);
+        const phone = normalizePhone(rawPhone);
+        const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+        const direction = msg.key.fromMe ? 'out' : 'in';
+
+        // Verificar si ya existe este mensaje
+        const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
+        if (exists) continue;
+
+        // Upsert contacto
+        let contact = await findContactByPhone(phone);
+        if (!contact) {
+          try {
+            const rows = await query(
+              'INSERT INTO contacts (phone, name) VALUES (?, ?) ON CONFLICT (phone) DO UPDATE SET name = COALESCE(contacts.name, EXCLUDED.name) RETURNING id, name',
+              [phone, msg.pushName || phone]
+            );
+            contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+          } catch (e) {
+            await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName || phone]);
+            contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+          }
+        }
+
+        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: text, timestamp, is_auto_reply: 0, sent_by: null });
+        await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
+        imported++;
+      } catch (e) {
+        // silencioso — mensajes históricos no deben crashear
+      }
+    }
+    if (imported > 0) {
+      console.log(`Historial importado: ${imported} mensajes nuevos`);
+      if (io) io.emit('history:synced', { count: imported });
+    }
+  });
 
   sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
     if (type !== 'notify') return;

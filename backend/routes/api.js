@@ -222,10 +222,14 @@ router.delete('/labels/:id', requireAuth, requireAdmin, async (req, res) => {
 router.get('/conversations', requireAuth, async (req, res) => {
   const { status, assigned, search } = req.query;
   let sql = `
-    SELECT cv.*, c.name as contact_name, c.phone as contact_phone, c.company,
+    SELECT cv.*,
+      COALESCE(c.name, c2.name) as contact_name,
+      COALESCE(c.phone, c2.phone) as contact_phone,
+      COALESCE(c.company, c2.company) as company,
       u.display_name as assigned_name, u.color as assigned_color
     FROM conversations cv
     LEFT JOIN contacts c ON cv.contact_id = c.id
+    LEFT JOIN contacts c2 ON c2.phone = REPLACE(REPLACE(cv.jid, '@s.whatsapp.net',''), '@c.us','')
     LEFT JOIN users u ON cv.assigned_to = u.id
     WHERE 1=1
   `;
