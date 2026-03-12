@@ -10,7 +10,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const { query, queryOne } = require('../db');
+const { query, queryOne, USE_PG } = require('../db');
 const { sendMessage, sendFile, getStatus, logout, normalizePhone } = require('../baileys');
 const { runCampaign, isRunning, requestCancel } = require('../sender');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
@@ -221,6 +221,12 @@ router.delete('/labels/:id', requireAuth, requireAdmin, async (req, res) => {
 
 router.get('/conversations', requireAuth, async (req, res) => {
   const { status, assigned, search } = req.query;
+
+  // Extraer teléfono del JID: "5491123456789@s.whatsapp.net" → "5491123456789"
+  const phoneFromJid = USE_PG
+    ? `SPLIT_PART(SPLIT_PART(cv.jid, '@', 1), ':', 1)`
+    : `SUBSTR(cv.jid, 1, INSTR(cv.jid, '@') - 1)`;
+
   let sql = `
     SELECT cv.*,
       COALESCE(c.name, c2.name) as contact_name,
@@ -229,7 +235,7 @@ router.get('/conversations', requireAuth, async (req, res) => {
       u.display_name as assigned_name, u.color as assigned_color
     FROM conversations cv
     LEFT JOIN contacts c ON cv.contact_id = c.id
-    LEFT JOIN contacts c2 ON c2.phone = REPLACE(REPLACE(cv.jid, '@s.whatsapp.net',''), '@c.us','')
+    LEFT JOIN contacts c2 ON c.id IS NULL AND c2.phone = ${phoneFromJid}
     LEFT JOIN users u ON cv.assigned_to = u.id
     WHERE 1=1
   `;
