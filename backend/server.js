@@ -11,7 +11,7 @@ const cors = require('cors');
 const path = require('path');
 const cron = require('node-cron');
 
-const { initDB, USE_PG } = require('./db');
+const { initDB, USE_PG, query } = require('./db');
 const { connect, setIO, getStatus } = require('./baileys');
 const { setIO: setSenderIO, isRunning, runCampaign } = require('./sender');
 const apiRoutes = require('./routes/api');
@@ -131,7 +131,6 @@ io.on('connection', (socket) => {
 
 cron.schedule('* * * * *', async () => {
   if (isRunning()) return;
-  const { query } = require('./db');
   try {
     const now = new Date().toISOString().replace('T', ' ').substring(0, 19);
     const scheduled = await query(
