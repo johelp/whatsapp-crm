@@ -634,67 +634,95 @@ router.get('/ai-config', requireAuth, requireAdmin, async (req, res) => {
   res.json(cfg);
 });
 
-// Test directo del agente IA — envía un mensaje de prueba y devuelve la respuesta
+// Test directo del agente IA v2
 router.post('/ai/test', requireAuth, requireAdmin, async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: 'Falta el mensaje de prueba' });
 
-  const { getAIConfig } = require('../ai-agent');
-
-  // Obtener config con la API key completa (sin sanitizar)
+  const { buildSystemPrompt } = require('../ai-agent');
   const config = await queryOne('SELECT * FROM ai_config LIMIT 1');
   if (!config?.is_active) return res.status(400).json({ error: 'El agente IA no está activo' });
-  if (!config?.api_key) return res.status(400).json({ error: 'No hay API key configurada' });
-
-  const { getDocumentContext } = require('../ai-agent');
+  if (!config?.api_key)   return res.status(400).json({ error: 'No hay API key configurada' });
 
   try {
-    const systemLines = [
-      `Sos el asistente virtual de ${config.company_name || 'la empresa'}.`,
-      'Respondés mensajes de WhatsApp de forma amigable, clara y concisa.',
-      'Nunca uses markdown ni asteriscos.',
-    ];
-    if (config.company_context?.trim()) systemLines.push('\n' + config.company_context.trim());
-    if (config.system_prompt?.trim()) systemLines.push('\n' + config.system_prompt.trim());
-    const systemPrompt = systemLines.join('\n');
+    const systemPrompt = await buildSystemPrompt(config, true); // forceRefresh
+    const history      = [{ role: 'user', content: message }];
+    const t0           = Date.now();
 
-    const history = [{ role: 'user', content: message }];
-
-    let response = null;
-    const t0 = Date.now();
+    // Reutilizar el mismo callProvider del agente v2
+    let response = null, tokensUsed = 0;
 
     if (config.provider === 'gemini') {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${config.model || 'gemini-1.5-flash'}:generateContent?key=${config.api_key}`;
       const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: systemPrompt }] },
           contents: [{ role: 'user', parts: [{ text: message }] }],
           generationConfig: { maxOutputTokens: config.max_tokens || 300, temperature: config.temperature ?? 0.7 },
         }),
       });
-      if (!r.ok) {
-        const errText = await r.text();
-        return res.status(400).json({ error: `Gemini ${r.status}: ${errText.substring(0,300)}` });
-      }
+      if (!r.ok) return res.status(400).json({ error: `Gemini ${r.status}: ${(await r.text()).substring(0,300)}` });
       const d = await r.json();
-      response = d.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+      response   = d.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+      tokensUsed = d.usageMetadata?.totalTokenCount || 0;
     } else if (config.provider === 'groq') {
       const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${config.api_key}` },
-        body: JSON.stringify({ model: config.model || 'llama3-8b-8192', messages: [{ role: 'system', content: systemPrompt }, ...history], max_tokens: config.max_tokens || 300 }),
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.api_key}` },
+        body: JSON.stringify({ model: config.model || 'llama-3.1-8b-instant', messages: [{ role: 'system', content: systemPrompt }, ...history], max_tokens: config.max_tokens || 300 }),
       });
       if (!r.ok) return res.status(400).json({ error: `Groq ${r.status}: ${(await r.text()).substring(0,300)}` });
       const d = await r.json();
-      response = d.choices?.[0]?.message?.content?.trim() || null;
+      response   = d.choices?.[0]?.message?.content?.trim() || null;
+      tokensUsed = d.usage?.total_tokens || 0;
+    } else if (config.provider === 'openai') {
+      const r = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.api_key}` },
+        body: JSON.stringify({ model: config.model || 'gpt-4o-mini', messages: [{ role: 'system', content: systemPrompt }, ...history], max_tokens: config.max_tokens || 300 }),
+      });
+      if (!r.ok) return res.status(400).json({ error: `OpenAI ${r.status}: ${(await r.text()).substring(0,300)}` });
+      const d = await r.json();
+      response   = d.choices?.[0]?.message?.content?.trim() || null;
+      tokensUsed = d.usage?.total_tokens || 0;
+    } else if (config.provider === 'anthropic') {
+      const r = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': config.api_key, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: config.model || 'claude-haiku-4-5', system: systemPrompt, messages: history, max_tokens: config.max_tokens || 300 }),
+      });
+      if (!r.ok) return res.status(400).json({ error: `Anthropic ${r.status}: ${(await r.text()).substring(0,300)}` });
+      const d = await r.json();
+      response   = d.content?.[0]?.text?.trim() || null;
+      tokensUsed = (d.usage?.input_tokens || 0) + (d.usage?.output_tokens || 0);
     } else {
-      return res.status(400).json({ error: `Proveedor ${config.provider} no soportado en test directo` });
+      return res.status(400).json({ error: `Proveedor ${config.provider} no soportado` });
     }
 
     const elapsed = Date.now() - t0;
-    res.json({ ok: true, response, provider: config.provider, model: config.model, elapsed_ms: elapsed });
+    res.json({ ok: true, response, provider: config.provider, model: config.model, elapsed_ms: elapsed, tokens_used: tokensUsed, prompt_tokens_est: Math.ceil(systemPrompt.length / 4) });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Métricas del agente IA v2
+router.get('/ai/metrics', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { getMetrics } = require('../ai-agent');
+    res.json({ ok: true, metrics: getMetrics() });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Invalidar cache del system prompt (útil después de actualizar config/documentos)
+router.post('/ai/invalidate-cache', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { invalidatePromptCache } = require('../ai-agent');
+    invalidatePromptCache();
+    res.json({ ok: true, message: 'Cache del system prompt invalidado' });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }

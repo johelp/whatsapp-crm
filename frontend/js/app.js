@@ -2155,17 +2155,22 @@ async function loadAIConfig() {
 
     <button class="btn-primary" onclick="saveAIConfig()" style="margin-bottom:16px">💾 Guardar configuración IA</button>
 
-    <!-- PANEL DE TEST DIRECTO -->
-    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:24px">
-      <h4 style="margin:0 0 10px 0;font-size:13px">🧪 Probar agente IA ahora mismo</h4>
+    <!-- PANEL DE TEST + MÉTRICAS (Agente v2) -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h4 style="margin:0;font-size:13px">🧪 Probar agente IA v2</h4>
+        <button class="btn-secondary" onclick="loadAIMetrics()" style="font-size:11px;padding:4px 10px">📊 Ver métricas</button>
+      </div>
       <div style="display:flex;gap:8px;align-items:flex-end">
         <div class="field" style="flex:1;margin:0">
           <input class="input" id="ai-test-input" placeholder='Ej: "Hola, ¿cuánto cuesta el servicio grupal?"' style="width:100%">
         </div>
         <button class="btn-secondary" onclick="testAIAgent()" style="white-space:nowrap">▶ Probar</button>
+        <button class="btn-secondary" onclick="invalidateAICache()" title="Forzar recarga del system prompt" style="white-space:nowrap;font-size:11px">🔄 Cache</button>
       </div>
       <div id="ai-test-result" style="margin-top:10px;display:none"></div>
     </div>
+    <div id="ai-metrics-box" style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px"></div>
 
     <hr style="border:none;border-top:1px solid var(--border);margin-bottom:20px">
 
@@ -2302,16 +2307,19 @@ async function testAIAgent() {
   if (!msg) { notify('Escribí un mensaje de prueba', 'warning'); return; }
 
   resultEl.style.display = 'block';
-  resultEl.innerHTML = `<div style="color:var(--text3);font-size:13px">⏳ Consultando a la IA...</div>`;
+  resultEl.innerHTML = `<div style="color:var(--text3);font-size:13px">⏳ Consultando a la IA v2...</div>`;
 
-  const t0 = Date.now();
   const res = await apiFetch('/ai/test', { method: 'POST', body: JSON.stringify({ message: msg }) });
-  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
 
   if (res?.ok) {
+    const tokenInfo = res.tokens_used
+      ? `<span style="margin-left:8px;opacity:.7">${res.tokens_used} tokens usados · ~${res.prompt_tokens_est} prompt</span>`
+      : '';
     resultEl.innerHTML = `
       <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:10px 14px">
-        <div style="font-size:11px;color:#16a34a;margin-bottom:6px">✅ ${res.provider} / ${res.model} — ${res.elapsed_ms}ms</div>
+        <div style="font-size:11px;color:#16a34a;margin-bottom:6px">
+          ✅ ${res.provider} / ${res.model} — ${res.elapsed_ms}ms${tokenInfo}
+        </div>
         <div style="font-size:13px;color:var(--text1);white-space:pre-wrap">${esc(res.response)}</div>
       </div>`;
   } else {
@@ -2320,6 +2328,71 @@ async function testAIAgent() {
         <div style="font-size:12px;color:#dc2626">❌ Error: ${esc(res?.error || 'Error desconocido')}</div>
       </div>`;
   }
+}
+
+async function loadAIMetrics() {
+  const box = document.getElementById('ai-metrics-box');
+  if (!box) return;
+  box.style.display = 'block';
+  box.innerHTML = '<div style="font-size:12px;color:var(--text3)">⏳ Cargando métricas...</div>';
+
+  const res = await apiFetch('/ai/metrics');
+  if (!res?.ok) { box.innerHTML = '<div style="color:#dc2626;font-size:12px">Error cargando métricas</div>'; return; }
+
+  const m = res.metrics;
+  const byJidRows = Object.entries(m.by_jid || {}).map(([jid, s]) =>
+    `<tr>
+      <td style="font-family:monospace;font-size:11px">${esc(jid)}</td>
+      <td style="text-align:center">${s.calls}</td>
+      <td style="text-align:center">${s.tokens.toLocaleString()}</td>
+      <td style="text-align:center">${s.last_ms}ms</td>
+      <td style="text-align:center;color:${s.errors>0?'#dc2626':'#16a34a'}">${s.errors}</td>
+    </tr>`
+  ).join('');
+
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <h4 style="margin:0;font-size:13px">📊 Métricas agente IA v2</h4>
+      <button class="btn-secondary" onclick="document.getElementById('ai-metrics-box').style.display='none'" style="font-size:11px;padding:3px 8px">✕</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">
+      <div style="background:var(--surface1);border-radius:6px;padding:8px;text-align:center">
+        <div style="font-size:18px;font-weight:700">${m.total_calls}</div>
+        <div style="font-size:11px;color:var(--text3)">Llamadas totales</div>
+      </div>
+      <div style="background:var(--surface1);border-radius:6px;padding:8px;text-align:center">
+        <div style="font-size:18px;font-weight:700">${(m.total_tokens_used||0).toLocaleString()}</div>
+        <div style="font-size:11px;color:var(--text3)">Tokens usados</div>
+      </div>
+      <div style="background:var(--surface1);border-radius:6px;padding:8px;text-align:center">
+        <div style="font-size:18px;font-weight:700">${m.active_queues}</div>
+        <div style="font-size:11px;color:var(--text3)">Colas activas</div>
+      </div>
+      <div style="background:var(--surface1);border-radius:6px;padding:8px;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:${m.errors>0?'#dc2626':'#16a34a'}">${m.errors}</div>
+        <div style="font-size:11px;color:var(--text3)">Errores</div>
+      </div>
+    </div>
+    <div style="font-size:11px;color:var(--text3);margin-bottom:8px">
+      System prompt: ${m.prompt_cached ? `en cache (${m.prompt_cache_age_s}s), ~${m.prompt_tokens_est} tokens` : 'sin cache'}
+    </div>
+    ${byJidRows ? `
+    <table style="width:100%;font-size:12px;border-collapse:collapse">
+      <thead>
+        <tr style="color:var(--text3);font-size:11px">
+          <th style="text-align:left;padding:4px 0">JID</th>
+          <th>Llamadas</th><th>Tokens</th><th>Último ms</th><th>Errores</th>
+        </tr>
+      </thead>
+      <tbody>${byJidRows}</tbody>
+    </table>` : '<div style="font-size:12px;color:var(--text3)">Sin actividad aún</div>'}
+  `;
+}
+
+async function invalidateAICache() {
+  const res = await apiFetch('/ai/invalidate-cache', { method: 'POST' });
+  if (res?.ok) notify('Cache del system prompt invalidado — se reconstruirá en el próximo mensaje', 'success');
+  else notify('Error: ' + (res?.error || 'desconocido'), 'error');
 }
 
 // ═══════════════════════════════════════════════════════════════

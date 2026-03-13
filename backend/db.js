@@ -392,6 +392,8 @@ async function runMigrations() {
       is_active INTEGER DEFAULT 1,
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
   ];
   for (const sql of migrations) {
     try { await query(sql); } catch(e) { console.log('Migration skip:', e.message.substring(0,60)); }
