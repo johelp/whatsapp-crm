@@ -1,837 +1,435 @@
 /**
- * baileys.js — Conexion WhatsApp con Baileys
- * Usa dynamic import() para compatibilidad con Node 18/20/22 (ESM)
+ * db.js — Capa de base de datos
+ * LOCAL:      sql.js (SQLite WebAssembly — sin compilacion, sin Visual Studio)
+ * PRODUCCION: PostgreSQL (Railway)
  */
-const pino = require('pino');
 const path = require('path');
-const fs = require('fs');
-const qrcode = require('qrcode');
-const { query, queryOne } = require('./db');
-const { runAIAgent } = require('./ai-agent');
+const fs   = require('fs');
 
-// Baileys se importa dinámicamente en connect() por ser ESM puro
-let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType;
+const USE_PG = !!process.env.DATABASE_URL;
 
-const AUTH_PATH = process.env.WA_AUTH_PATH
-  ? path.resolve(process.env.WA_AUTH_PATH)
-  : path.join(__dirname, '../auth');
+// SQLite en memoria (sql.js)
+let sqliteDb = null;
+const DB_PATH = path.join(__dirname, '../data/crm.db');
 
-if (!fs.existsSync(AUTH_PATH)) fs.mkdirSync(AUTH_PATH, { recursive: true });
+// PostgreSQL
+let pgPool;
+if (USE_PG) {
+  const { Pool } = require('pg');
+  pgPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: { rejectUnauthorized: false },
+  });
+}
 
-let sock = null;
-let io = null;
-let qrData = null;
-let connectionStatus = 'disconnected';
-let reconnectTimer = null;
+// ─── Persistencia sql.js (trabaja en memoria, guardamos a disco) ──────────────
 
-// Cache de metadata de grupos en memoria
-const _groupCache = new Map();
+function ensureDataDir() {
+  const dir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
 
-// Obtener metadata de un grupo con cache
-async function getGroupMetadata(jid) {
-  if (_groupCache.has(jid)) return _groupCache.get(jid);
+function saveDb() {
+  if (!sqliteDb || USE_PG) return;
   try {
-    if (!sock) return null;
-    const meta = await sock.groupMetadata(jid);
-    _groupCache.set(jid, meta);
-    return meta;
+    const data = sqliteDb.export();
+    fs.writeFileSync(DB_PATH, Buffer.from(data));
   } catch (e) {
-    console.error('[grupos] Error metadata', jid, e.message);
-    return null;
+    console.error('Error guardando DB:', e.message);
   }
 }
 
-function setIO(socketIO) { io = socketIO; }
-function getStatus() { return { status: connectionStatus, qr: qrData }; }
-function getSock() { return sock; }
+function startAutoSave() {
+  setInterval(saveDb, 15000); // guardar cada 15 segundos
+  process.on('exit', saveDb);
+  process.on('SIGINT', () => { saveDb(); process.exit(0); });
+  process.on('SIGTERM', () => { saveDb(); process.exit(0); });
+}
 
-// ─── Normalización de números ─────────────────────────────────────────────────
-// WhatsApp Argentina: algunos números llegan con 549... otros con 54...
-// Normalizamos siempre a 549XXXXXXXXXX para celulares argentinos
+// ─── Query adapter ────────────────────────────────────────────────────────────
 
-function normalizePhone(raw) {
-  let p = String(raw).replace(/\D/g, '');
+async function query(sql, params = []) {
+  if (USE_PG) {
+    let i = 0;
+    let pgSql = sql
+      .replace(/\?/g, () => `$${++i}`)
+      .replace(/AUTOINCREMENT/gi, '')
+      .replace(/datetime\s*\(\s*'now'\s*\)/gi, 'NOW()')
+      .replace(/datetime\s*\(\s*"now"\s*\)/gi, 'NOW()')
+      .replace(/DEFAULT\s+\(datetime\s*\(\s*'now'\s*\)\)/gi, 'DEFAULT NOW()')
+      .replace(/strftime\s*\([^)]+\)/gi, 'NOW()');
 
-  // Quitar prefijo de JID si viene con @
-  p = p.split('@')[0];
-
-  // Argentina: si empieza con 54 y el siguiente dígito NO es 9, insertar 9
-  // Ej: 5411XXXXXXXX -> 54911XXXXXXXX
-  // Ej: 5491XXXXXXXX -> 5491XXXXXXXX (ya correcto)
-  if (p.startsWith('54') && p.length >= 10) {
-    const sinPrefijo = p.slice(2);
-    if (!sinPrefijo.startsWith('9')) {
-      p = '549' + sinPrefijo;
+    // INSERT OR IGNORE → INSERT ... ON CONFLICT DO NOTHING
+    if (/INSERT\s+OR\s+IGNORE\s+INTO/i.test(pgSql)) {
+      pgSql = pgSql.replace(/INSERT\s+OR\s+IGNORE\s+INTO/i, 'INSERT INTO');
+      if (!/ON\s+CONFLICT/i.test(pgSql)) {
+        pgSql = pgSql.trimEnd().replace(/;?\s*$/, '') + ' ON CONFLICT DO NOTHING';
+      }
     }
+
+    const result = await pgPool.query(pgSql, params);
+    return result.rows;
   }
 
-  return p;
-}
+  // sql.js
+  if (!sqliteDb) throw new Error('DB no inicializada');
+  const trimmed = sql.trim().toUpperCase();
+  const isSelect = trimmed.startsWith('SELECT') || trimmed.startsWith('WITH');
 
-function normalizeJid(phone) {
-  return `${normalizePhone(phone)}@s.whatsapp.net`;
-}
-
-function extractPhone(jid) {
-  return jid.split('@')[0];
-}
-
-// Busca contacto por número, tolerando variantes con/sin 9
-async function findContactByPhone(phone) {
-  const clean = normalizePhone(phone);
-  let c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [clean]);
-  if (c) return c;
-
-  // Intentar variante: si tiene 549 buscar sin 9, y viceversa
-  let alt = clean;
-  if (clean.startsWith('549')) {
-    alt = '54' + clean.slice(3); // quitar el 9
-  } else if (clean.startsWith('54') && !clean.startsWith('549')) {
-    alt = '549' + clean.slice(2); // agregar el 9
-  }
-
-  return await queryOne('SELECT * FROM contacts WHERE phone = ?', [alt]);
-}
-
-function getMessageText(msg) {
-  if (!msg.message) return { type: 'unknown', text: '' };
-  const type = getContentType(msg.message);
-  const m = msg.message;
-  let text = '';
-  switch (type) {
-    case 'conversation': text = m.conversation; break;
-    case 'extendedTextMessage': text = m.extendedTextMessage?.text || ''; break;
-    case 'imageMessage': text = m.imageMessage?.caption || '[Imagen]'; break;
-    case 'videoMessage': text = m.videoMessage?.caption || '[Video]'; break;
-    case 'audioMessage': text = '[Audio]'; break;
-    case 'documentMessage': text = `[Archivo: ${m.documentMessage?.fileName || ''}]`; break;
-    case 'stickerMessage': text = '[Sticker]'; break;
-    case 'locationMessage': text = '[Ubicacion]'; break;
-    default: text = `[${type || 'mensaje'}]`;
-  }
-  return { type: type || 'text', text };
-}
-
-// ─── Auto-reply bot ───────────────────────────────────────────────────────────
-
-function isBusinessHours(config) {
-  if (!config?.is_active) return true;
-  const now = new Date();
-  const day = now.getDay();
-  const workDays = (config.working_days || '1,2,3,4,5').split(',').map(Number);
-  if (!workDays.includes(day)) return false;
-  const [sh, sm] = config.schedule_start.split(':').map(Number);
-  const [eh, em] = config.schedule_end.split(':').map(Number);
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-  return nowMin >= sh * 60 + sm && nowMin <= eh * 60 + em;
-}
-
-const fieldPrompts = {
-  name: '¿Cuál es tu nombre?',
-  email: '¿Cuál es tu email?',
-  phone: '¿En qué número podemos llamarte?',
-  reason: '¿Cuál es el motivo de tu consulta?',
-};
-
-async function runAutoReplyBot(jid, incomingText, conv) {
-  const config = await queryOne('SELECT * FROM auto_reply_config LIMIT 1');
-  if (!config || !config.is_active) return false;
-  if (isBusinessHours(config)) return false;
-
-  const botState = conv?.bot_state || 'idle';
-  const collected = JSON.parse(conv?.bot_collected || '{}');
-  const fields = JSON.parse(config.collect_fields || '["name","email","phone","reason"]');
-
-  let responseText = '';
-  let newState = botState;
-  let newCollected = { ...collected };
-
-  if (botState === 'idle') {
-    responseText = config.greeting_message || 'Hola! Estamos fuera de horario.';
-    if (fields.length > 0) {
-      responseText += `\n\n${fieldPrompts[fields[0]] || fields[0]}`;
-      newState = `collecting_${fields[0]}`;
-    } else {
-      newState = 'done';
-    }
-  } else if (botState.startsWith('collecting_')) {
-    const currentField = botState.replace('collecting_', '');
-    newCollected[currentField] = incomingText.trim();
-    const idx = fields.indexOf(currentField);
-    const next = fields[idx + 1];
-    if (next) {
-      responseText = fieldPrompts[next] || `Y tu ${next}?`;
-      newState = `collecting_${next}`;
-    } else {
-      const summary = Object.entries(newCollected)
-        .map(([k, v]) => `- ${k}: ${v}`).join('\n');
-      responseText = `Gracias! Tomamos nota:\n\n${summary}\n\nTe respondemos en el proximo horario de atencion.`;
-      newState = 'done';
-      if (io) io.emit('bot:lead_collected', { jid, phone: extractPhone(jid), data: newCollected, time: new Date().toISOString() });
-      await query('INSERT INTO activity_log (action, target_jid, detail) VALUES (?, ?, ?)',
-        ['bot_collected', jid, JSON.stringify(newCollected)]);
-    }
-  } else if (botState === 'done') {
-    responseText = `Hola de nuevo! Ya recibimos tu consulta. Te respondemos en horario de atencion (${config.schedule_start} - ${config.schedule_end}).`;
-  }
-
-  if (responseText && sock) {
-    await sock.sendMessage(jid, { text: responseText });
-    await saveMessage({
-      message_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-      jid, direction: 'out', type: 'text',
-      content: responseText, timestamp: Date.now(),
-      is_auto_reply: 1, sent_by: null,
-    });
-    await query(
-      'UPDATE conversations SET bot_state = ?, bot_collected = ?, updated_at = datetime(\'now\') WHERE jid = ?',
-      [newState, JSON.stringify(newCollected), jid]
-    );
-  }
-  return true;
-}
-
-// ─── DB helpers ───────────────────────────────────────────────────────────────
-
-async function saveMessage({ message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid = null, sender_name = null }) {
   try {
-    await query(
-      `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid, sender_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT (message_id) DO NOTHING`,
-      [message_id, jid, direction, type, content || '', timestamp, is_auto_reply ? 1 : 0, sent_by || null, sender_jid, sender_name]
-    );
-  } catch(e) {
-    console.error('[saveMessage] Error:', e.message, '| jid:', jid, '| msg_id:', message_id);
-  }
-}
+    if (isSelect) {
+      const result = sqliteDb.exec(sql, params);
+      if (!result.length) return [];
+      const { columns, values } = result[0];
+      return values.map(row => {
+        const obj = {};
+        columns.forEach((col, i) => { obj[col] = row[i]; });
+        return obj;
+      });
+    } else {
+      // Quitar clausulas no soportadas
+      let cleanSql = sql
+        .replace(/ON CONFLICT\s*\(\w+\)\s*DO NOTHING/gi, 'OR IGNORE INTO'.includes('INSERT') ? '' : '')
+        .replace(/RETURNING\s+\*/gi, '')
+        .replace(/RETURNING\s+\w+/gi, '');
 
-async function upsertConversationHistory(jid, contactId, lastMessage, lastMessageAt, direction) {
-  const existing = await queryOne('SELECT id, last_message_at FROM conversations WHERE jid = ?', [jid]);
-  if (existing) {
-    // Solo actualizar last_message si este mensaje es más reciente
-    await query(
-      `UPDATE conversations SET
-        contact_id = COALESCE(contact_id, ?),
-        last_message = CASE WHEN last_message_at < ? THEN ? ELSE last_message END,
-        last_message_at = CASE WHEN last_message_at < ? THEN ? ELSE last_message_at END
-       WHERE jid = ?`,
-      [contactId || null, lastMessageAt, lastMessage, lastMessageAt, lastMessageAt, jid]
-    );
-  } else {
-    await query(
-      `INSERT INTO conversations (jid, contact_id, last_message, last_message_at, unread_count) VALUES (?, ?, ?, ?, 0)`,
-      [jid, contactId || null, lastMessage, lastMessageAt]
-    );
-  }
-}
-
-async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pushName = null) {
-  const existing = await queryOne('SELECT id, unread_count FROM conversations WHERE jid = ?', [jid]);
-  if (existing) {
-    await query(
-      `UPDATE conversations SET
-        contact_id = COALESCE(?, contact_id),
-        wa_push_name = COALESCE(wa_push_name, ?),
-        last_message = ?,
-        last_message_at = ?,
-        unread_count = unread_count + 1,
-        updated_at = datetime('now')
-       WHERE jid = ?`,
-      [contactId || null, pushName, lastMessage, lastMessageAt, jid]
-    );
-  } else {
-    await query(
-      `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count)
-       VALUES (?, ?, ?, ?, ?, 1)`,
-      [jid, contactId || null, pushName, lastMessage, lastMessageAt]
-    );
-  }
-}
-
-// ─── Process GROUP message ────────────────────────────────────────────────────
-
-async function processGroupMessage(msg) {
-  if (!msg.message) return;
-
-  const groupJid = msg.key.remoteJid; // xxx@g.us
-  const senderJid = msg.key.participant || msg.participant || '';
-  const { type, text } = getMessageText(msg);
-  if (!text) return;
-
-  const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
-
-  // Obtener metadata del grupo con cache
-  const meta = await getGroupMetadata(groupJid);
-  const groupName = meta?.subject || groupJid;
-
-  // Nombre del sender: pushName > participante > número
-  let senderName = msg.pushName || senderJid.replace(/@.+$/, '');
-  if (!msg.pushName && meta?.participants) {
-    const p = meta.participants.find(p => p.id === senderJid || p.id.split(':')[0] + '@s.whatsapp.net' === senderJid);
-    if (p?.name) senderName = p.name;
-  }
-
-  // Upsert conversación del grupo
-  const existing = await queryOne('SELECT id, unread_count FROM conversations WHERE jid = ?', [groupJid]);
-  if (existing) {
-    await query(
-      `UPDATE conversations SET
-        group_name = ?, is_group = 1,
-        last_message = ?, last_message_at = ?,
-        unread_count = unread_count + 1,
-        updated_at = datetime('now')
-       WHERE jid = ?`,
-      [groupName, text, new Date(timestamp).toISOString(), groupJid]
-    );
-  } else {
-    await query(
-      `INSERT INTO conversations (jid, group_name, is_group, last_message, last_message_at, unread_count)
-       VALUES (?, ?, 1, ?, ?, 1)`,
-      [groupJid, groupName, text, new Date(timestamp).toISOString()]
-    );
-  }
-
-  // Guardar mensaje con sender_jid y sender_name
-  await saveMessage({
-    message_id: msg.key.id,
-    jid: groupJid,
-    direction: 'in',
-    type,
-    content: text,
-    timestamp,
-    is_auto_reply: 0,
-    sent_by: null,
-    sender_jid: senderJid,
-    sender_name: senderName,
-  });
-
-  const conv = await queryOne(`
-    SELECT cv.*, cv.group_name as contact_name
-    FROM conversations cv WHERE cv.jid = ?`, [groupJid]);
-
-  if (io) {
-    io.emit('message:new', {
-      jid: groupJid,
-      phone: groupJid,
-      contact_name: groupName,
-      content: text,
-      type,
-      timestamp,
-      is_auto_reply: false,
-      message_id: msg.key.id,
-      sender_jid: senderJid,
-      sender_name: senderName,
-      is_group: true,
-      conversation: conv,
-    });
-  }
-}
-
-// ─── Process incoming message ─────────────────────────────────────────────────
-
-async function processMessage(msg) {
-  if (!msg.message || msg.key.fromMe) return;
-
-  const rawJid = msg.key.remoteJid;
-  if (!rawJid || rawJid.includes('broadcast')) return;
-
-  // Derivar mensajes de grupos a su procesador dedicado
-  if (rawJid.endsWith('@g.us')) return processGroupMessage(msg);
-
-  const rawPhone = extractPhone(rawJid);
-  const phone = normalizePhone(rawPhone);
-
-  // Normalizar el JID: usar siempre el número normalizado (con 9 para Argentina)
-  // Esto evita que 543412824082 y 5493412824082 generen dos conversaciones distintas
-  const suffix = rawJid.includes('@lid') ? '@lid' : '@s.whatsapp.net';
-  const jid = rawJid.includes('@lid') ? rawJid : `${phone}${suffix}`;
-
-  const { type, text } = getMessageText(msg);
-  const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
-
-  // Buscar contacto existente (tolerando variantes con/sin 9)
-  let contact = await findContactByPhone(phone);
-
-  if (!contact) {
-    // Crear contacto nuevo — nombre solo si hay pushName (no poner el teléfono como nombre)
-    const contactName = msg.pushName || null;
-    try {
-      const rows = await query(
-        `INSERT INTO contacts (phone, name) VALUES (?, ?)
-         ON CONFLICT (phone) DO UPDATE SET
-           name = CASE
-             WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
-             ELSE contacts.name
-           END
-         RETURNING id, name, phone`,
-        [phone, contactName]
-      );
-      contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
-    } catch (e) {
-      // Fallback SQLite
-      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
-      contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
-    }
-  } else if (msg.pushName && (!contact.name || contact.name === phone || contact.name === contact.phone)) {
-    // Actualizar nombre si: era null, o era igual al teléfono (fallback anterior)
-    await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
-    contact.name = msg.pushName;
-  }
-
-  // Actualizar contact_id en conversación si faltaba
-  if (contact?.id) {
-    await query(
-      'UPDATE conversations SET contact_id = ? WHERE jid = ? AND contact_id IS NULL',
-      [contact.id, jid]
-    ).catch(() => {});
-  }
-
-  // Guardar mensaje usando JID original de WhatsApp
-  await saveMessage({
-    message_id: msg.key.id,
-    jid, direction: 'in', type, content: text,
-    timestamp, is_auto_reply: 0, sent_by: null,
-  });
-
-  // Upsert conversación
-  await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString(), msg.pushName || null);
-
-  const conv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [jid]);
-
-  const autoHandled = await runAutoReplyBot(jid, text, conv).catch(e => {
-    console.error('Error en auto-reply:', e.message);
-    return false;
-  });
-
-  // Si el auto-reply no manejó el mensaje, intentar con el agente IA
-  if (!autoHandled) {
-    runAIAgent(jid, text, sendMessage).catch(e => {
-      console.error('Error en agente IA:', e.message);
-    });
-  }
-
-  if (io) {
-    const convFull = await queryOne(`
-      SELECT cv.*, c.name as contact_name, c.phone as contact_phone
-      FROM conversations cv LEFT JOIN contacts c ON cv.contact_id = c.id
-      WHERE cv.jid = ?`, [jid]);
-    io.emit('message:new', {
-      jid, phone,
-      contact_name: contact?.name || msg.pushName || phone,
-      content: text, type, timestamp,
-      is_auto_reply: autoHandled,
-      message_id: msg.key.id,
-      conversation: convFull,
-    });
-  }
-}
-
-// ─── Connect ──────────────────────────────────────────────────────────────────
-
-async function connect() {
-  // Importar Baileys dinámicamente (es un módulo ESM)
-  if (!makeWASocket) {
-    const baileys = await import('@whiskeysockets/baileys');
-    makeWASocket = baileys.default;
-    useMultiFileAuthState = baileys.useMultiFileAuthState;
-    DisconnectReason = baileys.DisconnectReason;
-    fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
-    getContentType = baileys.getContentType;
-  }
-
-  const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
-  const { version } = await fetchLatestBaileysVersion();
-
-  sock = makeWASocket({
-    version,
-    auth: state,
-    logger: pino({ level: 'silent' }),
-    printQRInTerminal: false,
-    browser: ['WhatsApp CRM', 'Chrome', '121.0'],
-    generateHighQualityLinkPreview: false,
-    syncFullHistory: true,   // solicitar historial al móvil
-    markOnlineOnConnect: false,
-  });
-
-  connectionStatus = 'connecting';
-  if (io) io.emit('wa:status', { status: 'connecting' });
-
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    if (qr) {
-      qrData = await qrcode.toDataURL(qr);
-      connectionStatus = 'qr';
-      if (io) io.emit('wa:qr', { qr: qrData });
-      console.log('QR listo para escanear');
-    }
-
-    if (connection === 'close') {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = code === DisconnectReason.loggedOut;
-      connectionStatus = 'disconnected';
-      qrData = null;
-      if (io) io.emit('wa:status', { status: 'disconnected' });
-      if (!loggedOut) {
-        const delay = code === 408 ? 2000 : 5000;
-        reconnectTimer = setTimeout(connect, delay);
+      // Manejar ON CONFLICT ... DO UPDATE (UPSERT)
+      if (/ON CONFLICT.*DO UPDATE/i.test(cleanSql)) {
+        // sql.js soporta INSERT OR REPLACE
+        cleanSql = cleanSql.replace(/INSERT INTO/, 'INSERT OR REPLACE INTO')
+          .replace(/ON CONFLICT\s*\([^)]+\)\s*DO UPDATE SET[\s\S]*/i, '');
       }
-    }
 
-    if (connection === 'open') {
-      connectionStatus = 'connected';
-      qrData = null;
-      const phone = sock.user?.id?.split(':')[0] || '';
-      console.log(`WhatsApp conectado: ${phone}`);
-      if (io) io.emit('wa:status', { status: 'connected', phone });
-    }
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  // Historial sincronizado desde el móvil
-  sock.ev.on('messaging-history.set', async ({ messages: msgs, isLatest }) => {
-    console.log(`Sincronizando historial: ${msgs.length} mensajes (isLatest: ${isLatest})`);
-    let imported = 0;
-    for (const msg of msgs) {
-      try {
-        if (!msg.message || !msg.key?.remoteJid) continue;
-        const rawJid = msg.key.remoteJid;
-        if (rawJid.includes('broadcast') || rawJid.endsWith('@g.us')) continue;
-
-        const { type, text } = getMessageText(msg);
-        if (!text) continue;
-
-        const rawPhone = extractPhone(rawJid);
-        const phone = normalizePhone(rawPhone);
-        // Normalizar JID igual que en processMessage
-        const jid = rawJid.includes('@lid') ? rawJid : `${phone}@s.whatsapp.net`;
-
-        const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
-        const direction = msg.key.fromMe ? 'out' : 'in';
-
-        // Verificar si ya existe este mensaje
-        const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
-        if (exists) continue;
-
-        // Upsert contacto — no usar teléfono como nombre
-        let contact = await findContactByPhone(phone);
-        if (!contact) {
-          const contactName = msg.pushName || null;
-          try {
-            const rows = await query(
-              `INSERT INTO contacts (phone, name) VALUES (?, ?)
-               ON CONFLICT (phone) DO UPDATE SET
-                 name = CASE
-                   WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
-                   ELSE contacts.name
-                 END
-               RETURNING id, name`,
-              [phone, contactName]
-            );
-            contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
-          } catch (e) {
-            await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
-            contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
-          }
-        } else if (msg.pushName && (!contact.name || contact.name === phone)) {
-          await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
-          contact.name = msg.pushName;
-        }
-
-        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: text, timestamp, is_auto_reply: 0, sent_by: null });
-        await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
-        imported++;
-      } catch (e) {
-        // silencioso — mensajes históricos no deben crashear
+      // ON CONFLICT DO NOTHING
+      if (/ON CONFLICT.*DO NOTHING/i.test(cleanSql)) {
+        cleanSql = cleanSql.replace(/INSERT INTO/, 'INSERT OR IGNORE INTO')
+          .replace(/ON CONFLICT[^;]*/i, '');
       }
-    }
-    if (imported > 0) {
-      console.log(`Historial importado: ${imported} mensajes nuevos`);
-      if (io) io.emit('history:synced', { count: imported });
-    }
-  });
 
-  sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
-    if (type !== 'notify') return;
-    for (const msg of msgs) {
-      await processMessage(msg).catch(e => console.error('Error procesando mensaje:', e.message));
+      sqliteDb.run(cleanSql.trim(), params);
+      const lastId = sqliteDb.exec('SELECT last_insert_rowid() as id')[0]?.values[0][0] || null;
+      return [{ id: lastId, lastInsertRowid: lastId, changes: 1 }];
     }
-  });
-
-  // ─── Eventos de grupos ─────────────────────────────────────────────────────
-
-  // Cambio de nombre, descripción, etc.
-  sock.ev.on('groups.update', async (updates) => {
-    for (const update of updates) {
-      if (!update.id) continue;
-      if (update.subject) {
-        // Actualizar cache
-        const cached = _groupCache.get(update.id);
-        if (cached) _groupCache.set(update.id, { ...cached, subject: update.subject });
-        // Actualizar DB
-        await query(
-          `UPDATE conversations SET group_name = ?, updated_at = datetime('now') WHERE jid = ?`,
-          [update.subject, update.id]
-        ).catch(() => {});
-        if (io) io.emit('group:updated', { jid: update.id, name: update.subject });
-      }
-    }
-  });
-
-  // Grupos nuevos a los que el teléfono fue agregado
-  sock.ev.on('groups.upsert', async (groups) => {
-    for (const group of groups) {
-      _groupCache.set(group.id, group);
-      // Si ya existe la conv, actualizar nombre
-      const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [group.id]);
-      if (existing) {
-        await query(
-          `UPDATE conversations SET group_name = ?, is_group = 1, updated_at = datetime('now') WHERE jid = ?`,
-          [group.subject, group.id]
-        ).catch(() => {});
-        if (io) io.emit('group:updated', { jid: group.id, name: group.subject });
-      }
-    }
-  });
+  } catch (e) {
+    console.error('SQL Error:', e.message);
+    console.error('SQL:', sql.substring(0, 300));
+    throw e;
+  }
 }
 
-// ─── Send message ─────────────────────────────────────────────────────────────
-
-async function sendMessage(phone, text, sentBy = null) {
-  if (!sock || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp no está conectado');
-  }
-
-  // JID base normalizado (el que tenemos en nuestra DB)
-  const baseJid = normalizeJid(phone);
-
-  // Resolver el JID real de WhatsApp — puede diferir del nuestro (Business ID, @lid, etc.)
-  let sendJid = baseJid;
-  try {
-    const [result] = await sock.onWhatsApp(baseJid);
-    if (result?.exists && result?.jid) {
-      sendJid = result.jid; // JID real para el envío
-    }
-  } catch(e) {
-    // Si onWhatsApp falla, seguir con el JID normalizado
-  }
-
-  await sock.presenceSubscribe(sendJid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', sendJid);
-  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
-  await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', sendJid);
-
-  const sent = await sock.sendMessage(sendJid, { text });
-
-  // Para guardar en DB siempre usar el JID que tenemos en conversaciones (baseJid)
-  // Si el JID de envío difiere, buscar la conv por el JID base
-  // Esto evita crear conversaciones duplicadas con JIDs raros de WhatsApp Business
-  const convJid = baseJid;
-
-  await saveMessage({
-    message_id: sent.key.id,
-    jid: convJid, direction: 'out', type: 'text',
-    content: text, timestamp: Date.now(),
-    is_auto_reply: 0, sent_by: sentBy,
-  });
-
-  const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [convJid]);
-  if (existing) {
-    await query(
-      `UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`,
-      [text, convJid]
-    );
-  } else {
-    // Intentar encontrar la conversación por variantes del número
-    const phoneOnly = phone.replace(/\D/g,'');
-    const altConv = await queryOne(
-      `SELECT jid FROM conversations WHERE jid LIKE ? OR jid LIKE ?`,
-      [`%${phoneOnly}%`, `%${normalizePhone(phoneOnly)}%`]
-    );
-    const targetJid = altConv?.jid || convJid;
-    await query(
-      `INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, NOW())
-       ON CONFLICT (jid) DO UPDATE SET last_message = EXCLUDED.last_message, last_message_at = NOW()`,
-      [targetJid, text]
-    ).catch(() => {});
-  }
-
-  if (io) {
-    let sentByName = null, sentByColor = null;
-    if (sentBy) {
-      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
-      sentByName = user?.display_name || null;
-      sentByColor = user?.color || null;
-    }
-    io.emit('message:sent', {
-      jid: convJid,
-      content: text,
-      timestamp: Date.now(),
-      direction: 'out',
-      type: 'text',
-      sent_by: sentBy,
-      sent_by_name: sentByName,
-      sent_by_color: sentByColor,
-    });
-  }
-
-  return sent;
+async function queryOne(sql, params = []) {
+  const rows = await query(sql, params);
+  return rows[0] || null;
 }
 
-async function sendGroupMessage(groupJid, text, sentBy = null) {
-  if (!sock || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp no está conectado');
+async function execute(sql) {
+  if (USE_PG) {
+    // Transformar SQLite → PostgreSQL
+    const pgSql = sql
+      .replace(/INTEGER PRIMARY KEY AUTOINCREMENT/gi, 'SERIAL PRIMARY KEY')
+      .replace(/DEFAULT\s+\(datetime\s*\(\s*'now'\s*\)\)/gi, 'DEFAULT NOW()')
+      .replace(/datetime\s*\(\s*'now'\s*\)/gi, 'NOW()')
+      .replace(/TEXT DEFAULT \(datetime/gi, 'TIMESTAMPTZ DEFAULT (NOW')
+      .replace(/\bTEXT\b(?=\s+DEFAULT NOW\(\))/gi, 'TIMESTAMPTZ');
+
+    const stmts = pgSql.split(';').map(s => s.trim()).filter(s => s.length > 0);
+    for (const stmt of stmts) {
+      await pgPool.query(stmt).catch(e => {
+        if (!e.message.includes('already exists')) throw e;
+      });
+    }
+    return;
   }
+  // sql.js: ejecutar statement por statement
+  const stmts = sql.split(';').map(s => s.trim()).filter(s => s.length > 0);
+  for (const stmt of stmts) {
+    try { sqliteDb.run(stmt); } catch (e) { /* ignorar "table already exists" */ }
+  }
+}
 
-  await sock.presenceSubscribe(groupJid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', groupJid);
-  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
-  await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', groupJid);
+// ─── SCHEMA ───────────────────────────────────────────────────────────────────
 
-  const sent = await sock.sendMessage(groupJid, { text });
+async function createTables() {
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      display_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT DEFAULT 'agent',
+      color TEXT DEFAULT '#6366f1',
+      is_active INTEGER DEFAULT 1,
+      last_seen TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      phone TEXT UNIQUE NOT NULL,
+      name TEXT,
+      company TEXT,
+      extra TEXT,
+      notes TEXT,
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS labels (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE NOT NULL,
+      color TEXT DEFAULT '#6366f1',
+      description TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS contact_labels (
+      contact_id INTEGER,
+      label_id INTEGER,
+      assigned_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (contact_id, label_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS conversations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      jid TEXT UNIQUE NOT NULL,
+      contact_id INTEGER,
+      wa_push_name TEXT,
+      status TEXT DEFAULT 'open',
+      assigned_to INTEGER,
+      unread_count INTEGER DEFAULT 0,
+      last_message TEXT,
+      last_message_at TEXT,
+      bot_state TEXT DEFAULT 'idle',
+      bot_collected TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now')),
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS conversation_labels (
+      conversation_id INTEGER,
+      label_id INTEGER,
+      assigned_at TEXT DEFAULT (datetime('now')),
+      PRIMARY KEY (conversation_id, label_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_id TEXT UNIQUE,
+      jid TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      type TEXT DEFAULT 'text',
+      content TEXT,
+      timestamp BIGINT,
+      is_read INTEGER DEFAULT 0,
+      is_auto_reply INTEGER DEFAULT 0,
+      sent_by INTEGER,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS campaigns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      type TEXT DEFAULT 'general',
+      template TEXT NOT NULL,
+      status TEXT DEFAULT 'draft',
+      total INTEGER DEFAULT 0,
+      sent INTEGER DEFAULT 0,
+      failed INTEGER DEFAULT 0,
+      delay_min INTEGER DEFAULT 8,
+      delay_max INTEGER DEFAULT 25,
+      created_by INTEGER,
+      scheduled_at TEXT,
+      started_at TEXT,
+      completed_at TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS campaign_contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      campaign_id INTEGER,
+      contact_id INTEGER,
+      phone TEXT NOT NULL,
+      name TEXT,
+      extra_field TEXT,
+      status TEXT DEFAULT 'pending',
+      sent_at TEXT,
+      error TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS quick_replies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      trigger_text TEXT,
+      content TEXT NOT NULL,
+      category TEXT DEFAULT 'general',
+      use_count INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS auto_reply_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      is_active INTEGER DEFAULT 0,
+      schedule_start TEXT DEFAULT '09:00',
+      schedule_end TEXT DEFAULT '18:00',
+      working_days TEXT DEFAULT '1,2,3,4,5',
+      greeting_message TEXT,
+      collect_fields TEXT DEFAULT '["name","email","phone","reason"]',
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS activity_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      target_jid TEXT,
+      detail TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS file_library (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      filename TEXT NOT NULL,
+      original_name TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size INTEGER DEFAULT 0,
+      category TEXT DEFAULT 'general',
+      uploaded_by INTEGER,
+      use_count INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS ai_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      is_active INTEGER DEFAULT 0,
+      provider TEXT DEFAULT 'openai',
+      api_key TEXT,
+      model TEXT DEFAULT 'gpt-4o-mini',
+      system_prompt TEXT,
+      company_name TEXT,
+      company_context TEXT,
+      response_delay_min INTEGER DEFAULT 3,
+      response_delay_max INTEGER DEFAULT 8,
+      max_tokens INTEGER DEFAULT 300,
+      temperature REAL DEFAULT 0.7,
+      only_outside_hours INTEGER DEFAULT 1,
+      working_hours_start TEXT DEFAULT '09:00',
+      working_hours_end TEXT DEFAULT '18:00',
+      working_days TEXT DEFAULT '1,2,3,4,5',
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`,
+  ];
 
-  // Obtener nombre del grupo para la DB
-  const meta = await getGroupMetadata(groupJid);
-  const groupName = meta?.subject || groupJid;
-  const timestamp = Date.now();
+  for (const stmt of tables) {
+    if (USE_PG) {
+      const pgStmt = stmt
+        .replace(/INTEGER PRIMARY KEY AUTOINCREMENT/g, 'SERIAL PRIMARY KEY')
+        .replace(/TEXT DEFAULT \(datetime\('now'\)\)/g, "TIMESTAMP DEFAULT NOW()")
+        .replace(/datetime\('now'\)/g, "NOW()");
+      await pgPool.query(pgStmt).catch(e => {
+        if (!e.message.includes('already exists')) throw e;
+      });
+    } else {
+      try { sqliteDb.run(stmt); } catch (e) { /* ya existe */ }
+    }
+  }
+}
 
-  await saveMessage({
-    message_id: sent.key.id,
-    jid: groupJid, direction: 'out', type: 'text',
-    content: text, timestamp,
-    is_auto_reply: 0, sent_by: sentBy,
-  });
+// ─── SEED DATA ────────────────────────────────────────────────────────────────
 
-  // Actualizar last_message de la conversación del grupo
+async function seedData() {
+  const existing = await queryOne('SELECT id FROM users LIMIT 1');
+  if (existing) return;
+
+  const bcrypt = require('bcryptjs');
+  const hash = await bcrypt.hash('admin123', 10);
+
   await query(
-    `UPDATE conversations SET last_message = ?, last_message_at = datetime('now'), group_name = ?, is_group = 1, updated_at = datetime('now') WHERE jid = ?`,
-    [text, groupName, groupJid]
-  ).catch(() => {});
+    'INSERT INTO users (username, display_name, password_hash, role, color) VALUES (?, ?, ?, ?, ?)',
+    ['admin', 'Administrador', hash, 'admin', '#16a34a']
+  );
 
-  if (io) {
-    let sentByName = null, sentByColor = null;
-    if (sentBy) {
-      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
-      sentByName = user?.display_name || null;
-      sentByColor = user?.color || null;
+  const defaultLabels = [
+    ['Consulta',        '#3b82f6', 'Consulta general'],
+    ['Presupuesto',     '#f59e0b', 'Solicitud de presupuesto'],
+    ['Inscripcion',     '#10b981', 'Proceso de inscripcion'],
+    ['Alquiler equipo', '#8b5cf6', 'Alquiler de equipo'],
+    ['Clase privada',   '#f97316', 'Clase privada solicitada'],
+    ['No contactar',    '#ef4444', 'No volver a contactar'],
+    ['Resena solicitada','#06b6d4','Se pidio resena'],
+    ['Seguimiento',     '#84cc16', 'Pendiente de seguimiento'],
+  ];
+  for (const [name, color, description] of defaultLabels) {
+    await query('INSERT INTO labels (name, color, description) VALUES (?, ?, ?)', [name, color, description]);
+  }
+
+  const qrs = [
+    ['Bienvenida',       '/hola',        'saludos',  'Hola {{nombre}}! Bienvenido/a a Snow Motion. En que podemos ayudarte?'],
+    ['Horarios clases',  '/horarios',    'info',     'Nuestras clases son Lun-Vie 9:00-17:00 y fines de semana 8:00-16:00.'],
+    ['Solicitar resena', '/resena',      'resenas',  'Hola {{nombre}}! Fue un placer tenerte en Snow Motion. Podrias dejarnos una resena? [LINK]'],
+    ['Envio presupuesto','/presupuesto', 'ventas',   'Hola {{nombre}}! Te enviamos el presupuesto solicitado. Cualquier consulta avisanos.'],
+    ['Confirmar reserva','/confirmar',   'reservas', 'Perfecto {{nombre}}! Tu reserva quedo confirmada. Te esperamos!'],
+  ];
+  for (const [name, trigger, category, content] of qrs) {
+    await query('INSERT INTO quick_replies (name, trigger_text, category, content) VALUES (?, ?, ?, ?)', [name, trigger, category, content]);
+  }
+
+  await query(
+    'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, greeting_message, collect_fields) VALUES (?, ?, ?, ?, ?)',
+    [0, '09:00', '18:00',
+     'Hola! Gracias por escribirnos a Snow Motion.\n\nEstamos fuera del horario de atencion (Lun-Vie 9:00-18:00).\n\nPara ayudarte mejor te hacemos unas preguntas rapidas:',
+     '["name","email","phone","reason"]']
+  );
+
+  console.log('Datos iniciales cargados — usuario: admin / contrasena: admin123');
+  saveDb();
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+
+async function runMigrations() {
+  if (!USE_PG) return;
+  const migrations = [
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
+    // CRÍTICO: timestamp en milisegundos supera el rango de INTEGER (32-bit). Necesita BIGINT.
+    `ALTER TABLE messages ALTER COLUMN timestamp TYPE BIGINT`,
+    `CREATE TABLE IF NOT EXISTS ai_documents (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      content TEXT NOT NULL,
+      file_type TEXT DEFAULT 'text',
+      size INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
+    // ── v2: Grupos WhatsApp ──────────────────────────────────────
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
+    // ── v2: Sender por mensaje (grupos multi-participante) ───────
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+  ];
+  for (const sql of migrations) {
+    try { await query(sql); } catch(e) { console.log('Migration skip:', e.message.substring(0,60)); }
+  }
+  console.log('Migraciones aplicadas');
+}
+
+async function initDB() {
+  if (!USE_PG) {
+    ensureDataDir();
+    const initSqlJs = require('sql.js');
+    const SQL = await initSqlJs();
+
+    if (fs.existsSync(DB_PATH)) {
+      const fileBuffer = fs.readFileSync(DB_PATH);
+      sqliteDb = new SQL.Database(fileBuffer);
+      console.log('Base de datos cargada desde disco');
+    } else {
+      sqliteDb = new SQL.Database();
+      console.log('Nueva base de datos creada');
     }
-    io.emit('message:sent', {
-      jid: groupJid,
-      content: text,
-      timestamp,
-      direction: 'out',
-      type: 'text',
-      sent_by: sentBy,
-      sent_by_name: sentByName,
-      sent_by_color: sentByColor,
-      is_group: true,
-    });
+
+    startAutoSave();
   }
 
-  return sent;
+  await createTables();
+  await runMigrations();
+  await seedData();
+
+  console.log(`Base de datos lista (${USE_PG ? 'PostgreSQL' : 'SQLite/sql.js'})`);
 }
 
-async function sendFile(phone, filePath, mimeType, fileName, caption = '', sentBy = null) {
-  if (!sock || connectionStatus !== 'connected') throw new Error('WhatsApp no está conectado');
-
-  const jid = normalizeJid(phone);
-  const fileBuffer = fs.readFileSync(filePath);
-
-  let message;
-  if (mimeType.startsWith('image/')) {
-    message = { image: fileBuffer, caption, fileName };
-  } else if (mimeType.startsWith('video/')) {
-    message = { video: fileBuffer, caption, fileName };
-  } else if (mimeType.startsWith('audio/')) {
-    message = { audio: fileBuffer, mimetype: mimeType };
-  } else {
-    message = { document: fileBuffer, mimetype: mimeType, fileName, caption };
-  }
-
-  await sock.presenceSubscribe(jid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', jid);
-  await new Promise(r => setTimeout(r, 1000));
-  await sock.sendPresenceUpdate('paused', jid);
-
-  const sent = await sock.sendMessage(jid, message);
-
-  const content = caption || `[${fileName}]`;
-  await saveMessage({
-    message_id: sent.key.id,
-    jid, direction: 'out', type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage',
-    content, timestamp: Date.now(), is_auto_reply: 0, sent_by: sentBy,
-  });
-
-  const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
-  if (existing) {
-    await query(`UPDATE conversations SET last_message = ?, last_message_at = datetime('now'), updated_at = datetime('now') WHERE jid = ?`, [content, jid]);
-  } else {
-    await query(`INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, datetime('now'))`, [jid, content]);
-  }
-
-  if (io) {
-    let sentByName = null, sentByColor = null;
-    if (sentBy) {
-      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
-      sentByName = user?.display_name || null;
-      sentByColor = user?.color || null;
-    }
-    io.emit('message:sent', {
-      jid: normalizeJid(phone),
-      content,
-      timestamp: Date.now(),
-      sent_by: sentBy,
-      sent_by_name: sentByName,
-      sent_by_color: sentByColor,
-      type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage',
-    });
-  }
-  return sent;
-}
-
-async function logout() {
-  if (sock) {
-    await sock.logout().catch(() => {});
-    sock = null;
-  }
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  _groupCache.clear();
-  if (fs.existsSync(AUTH_PATH)) {
-    fs.rmSync(AUTH_PATH, { recursive: true, force: true });
-    fs.mkdirSync(AUTH_PATH, { recursive: true });
-  }
-  connectionStatus = 'disconnected';
-  qrData = null;
-  setTimeout(connect, 1000);
-}
-
-// Fuerza re-sincronización del historial desde el teléfono
-// borrando las credenciales de sesión y reconectando
-async function requestHistoryResync() {
-  if (!sock || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp no conectado');
-  }
-  try {
-    // Baileys: fetchAllSupportedFeatures fuerza historial si el sock lo soporta
-    await sock.sendNode({
-      tag: 'iq',
-      attrs: { type: 'get', to: 's.whatsapp.net', xmlns: 'urn:xmpp:whatsapp:dirty' },
-      content: [{ tag: 'clean', attrs: { type: 'account_sync' } }]
-    }).catch(() => {});
-  } catch(e) { /* ignorar */ }
-
-  // Emitir historial nuevamente desde el store de mensajes en memoria si existe
-  if (sock.ev) {
-    sock.ev.emit('messaging-history.set', {
-      messages: [],
-      contacts: [],
-      chats: [],
-      isLatest: false
-    });
-  }
-  return true;
-}
-
-module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };
+module.exports = { query, queryOne, execute, initDB, saveDb, USE_PG };
