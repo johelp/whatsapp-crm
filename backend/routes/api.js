@@ -11,7 +11,7 @@ const path = require('path');
 const os = require('os');
 
 const { query, queryOne, USE_PG } = require('../db');
-const { sendMessage, sendFile, getStatus, logout, normalizePhone } = require('../baileys');
+const { sendMessage, sendGroupMessage, sendFile, getStatus, logout, normalizePhone } = require('../baileys');
 const { runCampaign, isRunning, requestCancel } = require('../sender');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 
@@ -281,15 +281,17 @@ router.get('/conversations', requireAuth, async (req, res) => {
 });
 
 router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {
+  // NOTA: evitar ::bigint que es sintaxis solo PostgreSQL — el cast lo hacemos en JS
   const msgs = await query(`
     SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
-           m.timestamp::bigint as timestamp,
+           m.timestamp,
            m.is_read, m.is_auto_reply, m.sent_by, m.created_at,
+           m.sender_jid, m.sender_name,
            u.display_name as sent_by_name, u.color as sent_by_color
     FROM messages m LEFT JOIN users u ON m.sent_by = u.id
     WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
   `, [decodeURIComponent(req.params.jid)]);
-  // Asegurar que timestamp es siempre número
+  // Asegurar que timestamp es siempre número (puede llegar como string de PG BIGINT)
   res.json(msgs.map(m => ({ ...m, timestamp: Number(m.timestamp) || 0 })));
 });
 
@@ -352,8 +354,13 @@ router.post('/send', requireAuth, async (req, res) => {
   const target = phone || (jid ? jid.split('@')[0] : null);
   if (!target || !message) return res.status(400).json({ error: 'phone/jid y message requeridos' });
   try {
-    const cleanPhone = normalizePhone(target);
-    await sendMessage(cleanPhone, message, req.session.user.id);
+    // Detectar grupos por JID completo
+    if (jid && jid.endsWith('@g.us')) {
+      await sendGroupMessage(jid, message, req.session.user.id);
+    } else {
+      const cleanPhone = normalizePhone(target);
+      await sendMessage(cleanPhone, message, req.session.user.id);
+    }
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -919,6 +926,12 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `UPDATE users SET is_active = 1 WHERE is_active IS NULL`,
     // Asegurar que conversations tiene columnas de timestamps
     `UPDATE conversations SET last_message_at = NOW() WHERE last_message_at IS NULL AND last_message IS NOT NULL`,
+    // ── v2: Grupos WhatsApp ──
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
+    // ── v2: Sender por mensaje (grupos) ──
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
     // Limpiar nombres de contactos que son iguales al teléfono (fallback anterior incorrecto)
     // Los setea a NULL para que la UI muestre el push_name de WA
     `UPDATE contacts SET name = NULL WHERE name = phone AND phone IS NOT NULL`,

@@ -24,6 +24,23 @@ let qrData = null;
 let connectionStatus = 'disconnected';
 let reconnectTimer = null;
 
+// Cache de metadata de grupos en memoria
+const _groupCache = new Map();
+
+// Obtener metadata de un grupo con cache
+async function getGroupMetadata(jid) {
+  if (_groupCache.has(jid)) return _groupCache.get(jid);
+  try {
+    if (!sock) return null;
+    const meta = await sock.groupMetadata(jid);
+    _groupCache.set(jid, meta);
+    return meta;
+  } catch (e) {
+    console.error('[grupos] Error metadata', jid, e.message);
+    return null;
+  }
+}
+
 function setIO(socketIO) { io = socketIO; }
 function getStatus() { return { status: connectionStatus, qr: qrData }; }
 function getSock() { return sock; }
@@ -176,13 +193,13 @@ async function runAutoReplyBot(jid, incomingText, conv) {
 
 // ─── DB helpers ───────────────────────────────────────────────────────────────
 
-async function saveMessage({ message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by }) {
+async function saveMessage({ message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid = null, sender_name = null }) {
   try {
     await query(
-      `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid, sender_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (message_id) DO NOTHING`,
-      [message_id, jid, direction, type, content || '', timestamp, is_auto_reply ? 1 : 0, sent_by || null]
+      [message_id, jid, direction, type, content || '', timestamp, is_auto_reply ? 1 : 0, sent_by || null, sender_jid, sender_name]
     );
   } catch(e) {
     console.error('[saveMessage] Error:', e.message, '| jid:', jid, '| msg_id:', message_id);
@@ -232,13 +249,95 @@ async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pu
   }
 }
 
+// ─── Process GROUP message ────────────────────────────────────────────────────
+
+async function processGroupMessage(msg) {
+  if (!msg.message) return;
+
+  const groupJid = msg.key.remoteJid; // xxx@g.us
+  const senderJid = msg.key.participant || msg.participant || '';
+  const { type, text } = getMessageText(msg);
+  if (!text) return;
+
+  const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+
+  // Obtener metadata del grupo con cache
+  const meta = await getGroupMetadata(groupJid);
+  const groupName = meta?.subject || groupJid;
+
+  // Nombre del sender: pushName > participante > número
+  let senderName = msg.pushName || senderJid.replace(/@.+$/, '');
+  if (!msg.pushName && meta?.participants) {
+    const p = meta.participants.find(p => p.id === senderJid || p.id.split(':')[0] + '@s.whatsapp.net' === senderJid);
+    if (p?.name) senderName = p.name;
+  }
+
+  // Upsert conversación del grupo
+  const existing = await queryOne('SELECT id, unread_count FROM conversations WHERE jid = ?', [groupJid]);
+  if (existing) {
+    await query(
+      `UPDATE conversations SET
+        group_name = ?, is_group = 1,
+        last_message = ?, last_message_at = ?,
+        unread_count = unread_count + 1,
+        updated_at = datetime('now')
+       WHERE jid = ?`,
+      [groupName, text, new Date(timestamp).toISOString(), groupJid]
+    );
+  } else {
+    await query(
+      `INSERT INTO conversations (jid, group_name, is_group, last_message, last_message_at, unread_count)
+       VALUES (?, ?, 1, ?, ?, 1)`,
+      [groupJid, groupName, text, new Date(timestamp).toISOString()]
+    );
+  }
+
+  // Guardar mensaje con sender_jid y sender_name
+  await saveMessage({
+    message_id: msg.key.id,
+    jid: groupJid,
+    direction: 'in',
+    type,
+    content: text,
+    timestamp,
+    is_auto_reply: 0,
+    sent_by: null,
+    sender_jid: senderJid,
+    sender_name: senderName,
+  });
+
+  const conv = await queryOne(`
+    SELECT cv.*, cv.group_name as contact_name
+    FROM conversations cv WHERE cv.jid = ?`, [groupJid]);
+
+  if (io) {
+    io.emit('message:new', {
+      jid: groupJid,
+      phone: groupJid,
+      contact_name: groupName,
+      content: text,
+      type,
+      timestamp,
+      is_auto_reply: false,
+      message_id: msg.key.id,
+      sender_jid: senderJid,
+      sender_name: senderName,
+      is_group: true,
+      conversation: conv,
+    });
+  }
+}
+
 // ─── Process incoming message ─────────────────────────────────────────────────
 
 async function processMessage(msg) {
   if (!msg.message || msg.key.fromMe) return;
 
   const rawJid = msg.key.remoteJid;
-  if (!rawJid || rawJid.includes('broadcast') || rawJid.endsWith('@g.us')) return;
+  if (!rawJid || rawJid.includes('broadcast')) return;
+
+  // Derivar mensajes de grupos a su procesador dedicado
+  if (rawJid.endsWith('@g.us')) return processGroupMessage(msg);
 
   const rawPhone = extractPhone(rawJid);
   const phone = normalizePhone(rawPhone);
@@ -458,6 +557,42 @@ async function connect() {
       await processMessage(msg).catch(e => console.error('Error procesando mensaje:', e.message));
     }
   });
+
+  // ─── Eventos de grupos ─────────────────────────────────────────────────────
+
+  // Cambio de nombre, descripción, etc.
+  sock.ev.on('groups.update', async (updates) => {
+    for (const update of updates) {
+      if (!update.id) continue;
+      if (update.subject) {
+        // Actualizar cache
+        const cached = _groupCache.get(update.id);
+        if (cached) _groupCache.set(update.id, { ...cached, subject: update.subject });
+        // Actualizar DB
+        await query(
+          `UPDATE conversations SET group_name = ?, updated_at = datetime('now') WHERE jid = ?`,
+          [update.subject, update.id]
+        ).catch(() => {});
+        if (io) io.emit('group:updated', { jid: update.id, name: update.subject });
+      }
+    }
+  });
+
+  // Grupos nuevos a los que el teléfono fue agregado
+  sock.ev.on('groups.upsert', async (groups) => {
+    for (const group of groups) {
+      _groupCache.set(group.id, group);
+      // Si ya existe la conv, actualizar nombre
+      const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [group.id]);
+      if (existing) {
+        await query(
+          `UPDATE conversations SET group_name = ?, is_group = 1, updated_at = datetime('now') WHERE jid = ?`,
+          [group.subject, group.id]
+        ).catch(() => {});
+        if (io) io.emit('group:updated', { jid: group.id, name: group.subject });
+      }
+    }
+  });
 }
 
 // ─── Send message ─────────────────────────────────────────────────────────────
@@ -544,6 +679,60 @@ async function sendMessage(phone, text, sentBy = null) {
   return sent;
 }
 
+async function sendGroupMessage(groupJid, text, sentBy = null) {
+  if (!sock || connectionStatus !== 'connected') {
+    throw new Error('WhatsApp no está conectado');
+  }
+
+  await sock.presenceSubscribe(groupJid).catch(() => {});
+  await sock.sendPresenceUpdate('composing', groupJid);
+  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
+  await new Promise(r => setTimeout(r, typingMs));
+  await sock.sendPresenceUpdate('paused', groupJid);
+
+  const sent = await sock.sendMessage(groupJid, { text });
+
+  // Obtener nombre del grupo para la DB
+  const meta = await getGroupMetadata(groupJid);
+  const groupName = meta?.subject || groupJid;
+  const timestamp = Date.now();
+
+  await saveMessage({
+    message_id: sent.key.id,
+    jid: groupJid, direction: 'out', type: 'text',
+    content: text, timestamp,
+    is_auto_reply: 0, sent_by: sentBy,
+  });
+
+  // Actualizar last_message de la conversación del grupo
+  await query(
+    `UPDATE conversations SET last_message = ?, last_message_at = datetime('now'), group_name = ?, is_group = 1, updated_at = datetime('now') WHERE jid = ?`,
+    [text, groupName, groupJid]
+  ).catch(() => {});
+
+  if (io) {
+    let sentByName = null, sentByColor = null;
+    if (sentBy) {
+      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
+      sentByName = user?.display_name || null;
+      sentByColor = user?.color || null;
+    }
+    io.emit('message:sent', {
+      jid: groupJid,
+      content: text,
+      timestamp,
+      direction: 'out',
+      type: 'text',
+      sent_by: sentBy,
+      sent_by_name: sentByName,
+      sent_by_color: sentByColor,
+      is_group: true,
+    });
+  }
+
+  return sent;
+}
+
 async function sendFile(phone, filePath, mimeType, fileName, caption = '', sentBy = null) {
   if (!sock || connectionStatus !== 'connected') throw new Error('WhatsApp no está conectado');
 
@@ -608,6 +797,7 @@ async function logout() {
     sock = null;
   }
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  _groupCache.clear();
   if (fs.existsSync(AUTH_PATH)) {
     fs.rmSync(AUTH_PATH, { recursive: true, force: true });
     fs.mkdirSync(AUTH_PATH, { recursive: true });
@@ -644,4 +834,4 @@ async function requestHistoryResync() {
   return true;
 }
 
-module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };
+module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };
