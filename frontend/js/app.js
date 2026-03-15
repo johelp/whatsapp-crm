@@ -35,6 +35,10 @@ const S = {
 // ═══════════════════════════════════════════════════════════════
 
 async function init() {
+  // Mostrar build en tooltip de la versión
+  const vEl = document.getElementById('app-version');
+  if (vEl) vEl.title = `Build ${APP_BUILD} · WhatsApp CRM`;
+
   // Obtener usuario actual
   const me = await apiFetch('/auth/me');
   if (!me || me.error) { window.location.href = '/login'; return; }
@@ -187,6 +191,15 @@ socket.on('group:updated', ({ jid, group_name }) => {
     if (S.activeJid === jid) {
       document.getElementById('ch-name').textContent = group_name;
     }
+  }
+});
+
+socket.on('history:progress', ({ total, imported, status }) => {
+  const banner = document.getElementById('sync-banner');
+  if (banner) {
+    const pct = total > 0 ? Math.round((imported / total) * 100) : 0;
+    const msgEl = banner.querySelector('.sync-msg');
+    if (msgEl) msgEl.textContent = `Importando historial... ${imported}/${total} mensajes (${pct}%)`;
   }
 });
 
@@ -857,7 +870,6 @@ async function saveContact() {
   if (!body.phone) { notify('El teléfono es obligatorio', 'error'); return; }
 
   if (window._saveFromChat) {
-    // Guardar desde conversación
     const res = await apiFetch('/contacts/from-conversation', {
       method: 'POST',
       body: JSON.stringify({ jid: window._saveFromChat, ...body }),
@@ -866,18 +878,20 @@ async function saveContact() {
     closeModal('modal-contact');
     await loadContacts();
     await loadConversations();
+    if (S.activeJid) openChat(S.activeJid);
     notify('✅ Contacto guardado');
   } else if (id) {
     await apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(body) });
     closeModal('modal-contact');
     await loadContacts();
-    await loadConversations(); // actualizar nombre en la bandeja inmediatamente
-    if (S.activeJid) openChat(S.activeJid); // refrescar header del chat
+    await loadConversations();
+    if (S.activeJid) openChat(S.activeJid);
     notify('✅ Contacto actualizado');
   } else {
-    const res = await apiFetch('/contacts', { method: 'POST', body: JSON.stringify(body) });
+    await apiFetch('/contacts', { method: 'POST', body: JSON.stringify(body) });
     closeModal('modal-contact');
     await loadContacts();
+    await loadConversations();
     notify('✅ Contacto agregado');
   }
 }
@@ -2090,7 +2104,7 @@ function showSyncBanner() {
     banner.id = 'sync-banner';
     banner.innerHTML = `
       <span class="sync-spinner"></span>
-      <span>Sincronizando historial de WhatsApp... los mensajes aparecerán en breve</span>
+      <span class="sync-msg">Sincronizando historial de WhatsApp...</span>
       <button onclick="hideSyncBanner()" style="margin-left:auto;background:none;border:none;color:inherit;cursor:pointer;font-size:16px">✕</button>
     `;
     document.body.insertBefore(banner, document.body.firstChild);
@@ -2616,6 +2630,16 @@ async function systemReset() {
   } else {
     notify(res?.error || 'Error', 'error');
   }
+}
+
+
+// ─── Versión del sistema ──────────────────────────────────────
+const APP_VERSION = '2.1.0';
+const APP_BUILD   = '20260315';
+
+function showVersion() {
+  const el = document.getElementById('app-version');
+  if (el) el.title = `Build ${APP_BUILD}`;
 }
 
 // ═══════════════════════════════════════════════════════════════

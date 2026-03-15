@@ -122,16 +122,34 @@ router.post('/contacts', requireAuth, async (req, res) => {
   const { phone, name, company, extra, notes } = req.body;
   if (!phone) return res.status(400).json({ error: 'Telefono requerido' });
   const clean = normalizePhone(phone);
-  await query(
-    'INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
-    [clean, name || '', company || '', extra || '', notes || '']
-  );
-  // Si ya existía, actualizar datos
-  await query(
-    'UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE phone = ? AND (name = \'\' OR name IS NULL OR name = phone)',
-    [name || '', company || '', extra || '', notes || '', clean]
-  );
+  try {
+    // PG: upsert real
+    await query(
+      `INSERT INTO contacts (phone, name, company, extra, notes)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (phone) DO UPDATE SET
+         name = EXCLUDED.name,
+         company = EXCLUDED.company,
+         extra = EXCLUDED.extra,
+         notes = EXCLUDED.notes,
+         updated_at = NOW()`,
+      [clean, name || '', company || '', extra || '', notes || '']
+    );
+  } catch(e) {
+    // SQLite fallback
+    await query('INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
+      [clean, name || '', company || '', extra || '', notes || '']);
+    await query('UPDATE contacts SET name=?, company=?, extra=?, notes=?, updated_at=datetime(\'now\') WHERE phone=?',
+      [name || '', company || '', extra || '', notes || '', clean]);
+  }
   const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [clean]);
+  // Actualizar wa_push_name en la conversación si existe, para que el nombre aparezca inmediatamente
+  if (c && name) {
+    await query(
+      'UPDATE conversations SET contact_id = ?, wa_push_name = ? WHERE jid LIKE ? OR jid LIKE ?',
+      [c.id, name, clean + '%', c.phone + '%']
+    ).catch(() => {});
+  }
   res.json(c);
 });
 
@@ -139,7 +157,13 @@ router.put('/contacts/:id', requireAuth, async (req, res) => {
   const { name, company, extra, notes } = req.body;
   await query('UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = NOW() WHERE id = ?',
     [name, company, extra, notes, req.params.id]);
-  // Notificar al frontend que recargue conversaciones (el nombre cambió)
+  // Actualizar wa_push_name en conversaciones de este contacto
+  if (name) {
+    await query(
+      'UPDATE conversations SET wa_push_name = ? WHERE contact_id = ?',
+      [name, req.params.id]
+    ).catch(() => {});
+  }
   res.json({ ok: true, reload: true });
 });
 

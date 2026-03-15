@@ -333,13 +333,13 @@ async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pu
     await query(
       `UPDATE conversations SET
         contact_id = COALESCE(?, contact_id),
-        wa_push_name = COALESCE(wa_push_name, ?),
+        wa_push_name = CASE WHEN ? IS NOT NULL AND ? != '' THEN ? ELSE wa_push_name END,
         last_message = ?,
         last_message_at = ?,
         unread_count = unread_count + 1,
-        updated_at = datetime('now')
+        updated_at = NOW()
        WHERE jid = ?`,
-      [contactId || null, pushName, lastMessage, lastMessageAt, jid]
+      [contactId || null, pushName, pushName, pushName, lastMessage, lastMessageAt, jid]
     );
   } else {
     await query(
@@ -646,10 +646,19 @@ async function processOutgoingMessage(msg) {
   const isGroup = rawJid.endsWith('@g.us');
   const isLid = rawJid.endsWith('@lid');
 
-  // Normalizar JID
-  const jid = isGroup ? rawJid
-    : isLid ? rawJid
-    : `${normalizePhone(extractPhone(rawJid))}@s.whatsapp.net`;
+  // Usar el JID exacto que viene de WA — NO normalizar con Argentina
+  // Si normalizamos podría no matchear con la conv existente (con/sin 9)
+  // Buscar si hay una conv existente que matchee este JID o variante
+  let jid = isGroup ? rawJid : isLid ? rawJid : rawJid;
+  if (!isGroup && !isLid) {
+    const normPhone = normalizePhone(extractPhone(rawJid));
+    const rawPhone2 = extractPhone(rawJid);
+    const existingConv = await queryOne(
+      `SELECT jid FROM conversations WHERE jid = ? OR jid = ? OR jid = ? LIMIT 1`,
+      [rawJid, `${normPhone}@s.whatsapp.net`, `${rawPhone2}@s.whatsapp.net`]
+    );
+    jid = existingConv?.jid || `${normPhone}@s.whatsapp.net`;
+  }
 
   // Verificar si ya existe en DB (lo envió el CRM → ya guardado)
   const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
@@ -759,7 +768,8 @@ async function connect() {
 
   // Historial sincronizado desde el móvil
   sock.ev.on('messaging-history.set', async ({ messages: msgs, isLatest }) => {
-    console.log(`Sincronizando historial: ${msgs.length} mensajes (isLatest: ${isLatest})`);
+    console.log(`[Historial] ${msgs.length} mensajes recibidos (isLatest: ${isLatest})`);
+    if (io) io.emit('history:progress', { total: msgs.length, imported: 0, status: 'starting' });
     let imported = 0;
     for (const msg of msgs) {
       try {
@@ -834,6 +844,10 @@ async function connect() {
           await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
         }
         imported++;
+        // Emitir progreso cada 50 mensajes
+        if (imported % 50 === 0 && io) {
+          io.emit('history:progress', { total: msgs.length, imported, status: 'importing' });
+        }
       } catch (e) {
         // silencioso — mensajes históricos no deben crashear
       }
