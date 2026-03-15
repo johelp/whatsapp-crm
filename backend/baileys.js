@@ -481,6 +481,72 @@ async function processMessage(msg) {
   }
 }
 
+// ─── Procesar un mensaje individual de historial (append) ────────────────────
+// Versión liviana de messaging-history.set para un único mensaje
+async function processHistoryMessage(msg) {
+  if (!msg.message || !msg.key?.remoteJid) return;
+  const rawJid = msg.key.remoteJid;
+  if (rawJid.includes('broadcast')) return;
+
+  const { type, text } = getMessageText(msg);
+  if (!text) return; // ignorar sin contenido textual
+
+  const isGroup = rawJid.endsWith('@g.us');
+  const isLid   = rawJid.endsWith('@lid');
+  const rawPhone = extractPhone(rawJid);
+  const phone = isLid ? rawPhone : normalizePhone(rawPhone);
+  const jid   = isGroup ? rawJid : (isLid ? rawJid : `${phone}@s.whatsapp.net`);
+  const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+  const direction = msg.key.fromMe ? 'out' : 'in';
+
+  // Si ya existe, ignorar
+  const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
+  if (exists) return;
+
+  // Guardar mensaje
+  await saveMessage({
+    message_id: msg.key.id, jid, direction, type, content: text,
+    timestamp, is_auto_reply: 0, sent_by: null,
+    sender_jid: isGroup ? (msg.key.participant || null) : null,
+    sender_name: isGroup ? (msg.pushName || null) : null,
+  });
+
+  // Upsert conversación (sin incrementar unread — es historial)
+  if (isGroup) {
+    let groupName = jid.split('@')[0];
+    try { const meta = await getGroupMetadata(jid); if (meta?.subject) groupName = meta.subject; } catch(e) {}
+    await query(
+      `INSERT INTO conversations (jid, is_group, group_name, last_message, last_message_at)
+       VALUES (?, 1, ?, ?, ?)
+       ON CONFLICT (jid) DO UPDATE SET
+         is_group = 1,
+         group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
+         last_message = CASE WHEN conversations.last_message_at < EXCLUDED.last_message_at THEN EXCLUDED.last_message ELSE conversations.last_message END,
+         last_message_at = CASE WHEN conversations.last_message_at < EXCLUDED.last_message_at THEN EXCLUDED.last_message_at ELSE conversations.last_message_at END`,
+      [jid, groupName, text, new Date(timestamp).toISOString()]
+    ).catch(() => {});
+  } else if (!isLid) {
+    let contact = await findContactByPhone(phone);
+    if (!contact && msg.pushName) {
+      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName]).catch(() => {});
+      contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
+    }
+    await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
+    // Actualizar wa_push_name si falta
+    if (msg.pushName) {
+      await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?',
+        [msg.pushName, jid]).catch(() => {});
+    }
+  } else {
+    // @lid: solo guardar sin crear contacto
+    await upsertConversationHistory(jid, null, text, new Date(timestamp).toISOString(), direction);
+    if (msg.pushName) {
+      await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?',
+        [msg.pushName, jid]).catch(() => {});
+    }
+  }
+}
+
 // ─── Mensajes enviados desde el móvil u otras sesiones WA ────────────────────
 // Cuando otro agente responde desde el teléfono o WhatsApp Web,
 // Baileys los recibe con fromMe=true y type='append' o 'notify'
@@ -751,10 +817,16 @@ async function connect() {
           );
         }
       } else {
-        // Mensajes entrantes: solo notify (append/historial lo maneja messaging-history.set)
         if (type === 'notify') {
+          // Mensaje entrante nuevo en tiempo real
           await processMessage(msg).catch(e =>
             console.error('Error procesando mensaje:', e.message)
+          );
+        } else if (type === 'append') {
+          // Historial entrante — procesarlo igual que messaging-history.set
+          // Esto garantiza que los mensajes lleguen aunque messaging-history.set no dispare
+          await processHistoryMessage(msg).catch(e =>
+            console.error('Error procesando historial append:', e.message)
           );
         }
       }

@@ -58,14 +58,49 @@ async function runCampaign(campaignId, userId) {
     const text = personalize(campaign.template, row);
 
     try {
-      // Buscar el JID real de la conversación (puede ser @lid, @s.whatsapp.net)
-      // Usar el número normalizado como fallback
       const cleanPhone = normalizePhone(row.phone);
-      const convRow = await queryOne(
-        `SELECT jid FROM conversations WHERE jid LIKE ? OR jid LIKE ? ORDER BY updated_at DESC LIMIT 1`,
-        [`%${cleanPhone}%`, `%${row.phone.replace(/\D/g,'')}%`]
+      const rawPhone = row.phone.replace(/\D/g, '');
+
+      // Buscar el JID real en el siguiente orden de prioridad:
+      // 1. Via contacts.phone → conversations.contact_id (el más confiable)
+      // 2. Via JID que contenga el número normalizado
+      // 3. Via JID que contenga el número original
+      // 4. Fallback: usar el número normalizado (crea nueva conv @s.whatsapp.net)
+      let targetJid = null;
+
+      // Método 1: por contact_id (funciona aunque el JID sea @lid)
+      const contactRow = await queryOne(
+        `SELECT cv.jid FROM conversations cv
+         JOIN contacts c ON cv.contact_id = c.id
+         WHERE c.phone = ? OR c.phone = ?
+         ORDER BY cv.updated_at DESC LIMIT 1`,
+        [cleanPhone, rawPhone]
       );
-      const targetJid = convRow?.jid || cleanPhone;
+      if (contactRow?.jid) targetJid = contactRow.jid;
+
+      // Método 2: JID directo (normalizado con @)
+      if (!targetJid) {
+        const jidRow = await queryOne(
+          `SELECT jid FROM conversations WHERE jid = ? OR jid = ? LIMIT 1`,
+          [cleanPhone + '@s.whatsapp.net', rawPhone + '@s.whatsapp.net']
+        );
+        if (jidRow?.jid) targetJid = jidRow.jid;
+      }
+
+      // Método 3: LIKE como último recurso
+      if (!targetJid) {
+        const likeRow = await queryOne(
+          `SELECT jid FROM conversations
+           WHERE jid LIKE ? OR jid LIKE ?
+           ORDER BY updated_at DESC LIMIT 1`,
+          [cleanPhone + '%', rawPhone + '%']
+        );
+        if (likeRow?.jid) targetJid = likeRow.jid;
+      }
+
+      // Método 4: fallback — normalizar con @s.whatsapp.net
+      if (!targetJid) targetJid = cleanPhone + '@s.whatsapp.net';
+
       await sendMessage(targetJid, text, userId);
       await query(
         "UPDATE campaign_contacts SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?",

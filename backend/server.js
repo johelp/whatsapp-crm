@@ -150,11 +150,7 @@ cron.schedule('* * * * *', async () => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 
 async function start() {
-  await initDB();
-  setIO(io);
-  setSenderIO(io);
-
-  // Escuchar PRIMERO — Railway necesita que el puerto esté disponible rápido
+  // 1. Escuchar el puerto PRIMERO — Railway mata el proceso si no responde en ~10s
   await new Promise(resolve => {
     httpServer.listen(PORT, () => {
       console.log(`\nWhatsApp CRM corriendo en http://localhost:${PORT}`);
@@ -164,7 +160,18 @@ async function start() {
     });
   });
 
-  // Conectar Baileys en background — no bloquea el startup
+  // 2. Inicializar DB (puede tardar con 25+ migraciones en PG)
+  try {
+    await initDB();
+  } catch(e) {
+    console.error('Error en initDB:', e.message);
+    // No salir — puede ser un error menor de migración
+  }
+
+  setIO(io);
+  setSenderIO(io);
+
+  // 3. Conectar Baileys en background
   connect().catch(err => {
     console.error('Error conectando WhatsApp (reintentando):', err.message);
   });
