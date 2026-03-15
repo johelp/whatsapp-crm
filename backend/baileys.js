@@ -730,4 +730,42 @@ async function requestHistoryResync() {
   return true;
 }
 
-module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };
+// ─── Reset completo de auth para forzar historial desde cero ─────────────────
+// Borra las credenciales guardadas — WA enviará historial completo en la reconexión
+
+async function fullResetAuth() {
+  console.log('[FullReset] Iniciando reset de credenciales WA...');
+  
+  // 1. Desconectar socket actual limpiamente (sin logout de WA — queremos mantener la sesión de WA activa)
+  try {
+    if (sock) {
+      sock.end(undefined);
+      sock = null;
+    }
+  } catch(e) { console.log('[FullReset] sock.end:', e.message); }
+
+  connectionStatus = 'disconnected';
+  if (io) io.emit('wa:status', { status: 'disconnected' });
+
+  // 2. Borrar archivos de credenciales para que Baileys los regenere
+  //    WA verá un dispositivo "nuevo" y mandará historial completo
+  try {
+    const files = fs.readdirSync(AUTH_PATH);
+    for (const f of files) {
+      fs.unlinkSync(path.join(AUTH_PATH, f));
+    }
+    console.log(`[FullReset] Eliminados ${files.length} archivos de auth`);
+  } catch(e) {
+    console.error('[FullReset] Error borrando auth:', e.message);
+    throw new Error('No se pudo borrar las credenciales: ' + e.message);
+  }
+
+  // 3. Reconectar — aparecerá QR para re-vincular
+  setTimeout(() => {
+    connect().catch(e => console.error('[FullReset] connect error:', e.message));
+  }, 1000);
+
+  return true;
+}
+
+module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };

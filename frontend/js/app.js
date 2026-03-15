@@ -1830,10 +1830,17 @@ async function renderSettings() {
           <button class="btn-secondary" onclick="systemResyncHistory()" title="Pide a WhatsApp que reenvíe el historial de mensajes">
             🔄 Re-sincronizar historial WA
           </button>
+          <button class="btn-warning" onclick="systemFullResetAuth()"
+            title="Borra la sesión y re-vincula desde cero — WhatsApp envía el historial COMPLETO"
+            style="background:var(--orange,#f97316);color:#fff;border:none;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">
+            🔁 Sincronización COMPLETA (re-vincular)
+          </button>
         </div>
       </div>
       <div id="seed-result" style="font-size:12px;color:var(--text3)">
-        El <b>Seed</b> crea un mensaje por chat usando el último mensaje guardado. El <b>Re-sync</b> le pide al teléfono que reenvíe el historial completo (puede tardar varios minutos).
+        El <b>Seed</b> crea un mensaje por chat usando el último mensaje guardado.<br>
+        El <b>Re-sync</b> pide al teléfono que reenvíe mensajes recientes.<br>
+        La <b>Sincronización COMPLETA</b> borra la sesión y re-vincula desde cero — WhatsApp manda TODO el historial (hasta 3 meses). Requiere escanear el QR nuevamente.
       </div>
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
@@ -2557,6 +2564,47 @@ async function systemSeedMessages() {
   } else {
     el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
     notify(res?.error || 'Error', 'error');
+  }
+}
+
+async function systemFullResetAuth() {
+  const pwd = document.getElementById('sys-pwd-seed')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña primero', 'warning'); return; }
+  
+  const ok = confirm(
+    'SINCRONIZACION COMPLETA\n\n' +
+    'Esto va a:\n' +
+    '1. Cerrar la sesion actual de WhatsApp\n' +
+    '2. Borrar las credenciales guardadas\n' +
+    '3. Mostrar un QR para re-vincular\n\n' +
+    'Al re-vincular, WhatsApp enviara el historial completo (hasta 3 meses).\n\n' +
+    'Continuar?'
+  );
+  if (!ok) return;
+
+  const el = document.getElementById('seed-result');
+  if (el) el.innerHTML = '⏳ Borrando credenciales y desconectando...';
+
+  const res = await apiFetch('/system/full-reset-auth', {
+    method: 'POST',
+    body: JSON.stringify({ password: pwd }),
+  });
+
+  if (res?.ok) {
+    notify('✅ ' + res.message, 'success');
+    if (el) el.innerHTML = `
+      <div style="background:var(--surface3);padding:12px;border-radius:8px;margin-top:8px">
+        <b>✅ Credenciales borradas.</b><br>
+        Ahora verás el QR en el panel de conexión (ícono de WhatsApp en la barra lateral).<br>
+        <b>Escanealo con tu teléfono</b> → WhatsApp enviará el historial completo automáticamente.
+      </div>`;
+    // Mostrar el QR después de 2 segundos
+    setTimeout(() => {
+      loadConversations();
+    }, 3000);
+  } else {
+    notify(res?.error || 'Error al resetear', 'error');
+    if (el) el.textContent = res?.error || 'Error';
   }
 }
 
