@@ -464,9 +464,22 @@ async function connect() {
       console.log('Conexión cerrada. Código:', code);
       connectionStatus = 'disconnected';
       if (io) io.emit('wa:status', { status: 'disconnected' });
-      if (code === DisconnectReason.loggedOut) {
-        console.log('Sesión cerrada. Re-escanear QR.');
+
+      if (code === DisconnectReason.loggedOut || code === 401) {
+        // Sesión expirada/cerrada — borrar credenciales para forzar nuevo QR
+        console.log('Sesión cerrada (loggedOut). Borrando credenciales para generar QR...');
+        try {
+          const files = fs.readdirSync(AUTH_PATH);
+          for (const f of files) fs.unlinkSync(path.join(AUTH_PATH, f));
+          console.log(`Credenciales borradas (${files.length} archivos). Reconectando...`);
+        } catch(e) {
+          console.error('Error borrando credenciales:', e.message);
+        }
+        // Reconectar después de 2s — Baileys generará QR automáticamente
+        clearTimeout(reconnectTimer);
+        reconnectTimer = setTimeout(() => connect().catch(console.error), 2000);
       } else {
+        // Otros errores — reconectar con las credenciales existentes
         clearTimeout(reconnectTimer);
         const delay = code === 440 ? 8000 : 4000;
         reconnectTimer = setTimeout(() => connect().catch(console.error), delay);

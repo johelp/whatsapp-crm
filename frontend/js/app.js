@@ -139,12 +139,15 @@ socket.on('wa:status', ({ status, phone, qr }) => {
 });
 
 socket.on('wa:qr', ({ qr }) => {
-  updateWAStatus('qr');
+  // Actualizar imagen
   const img = document.getElementById('qr-image');
-  img.src = qr;
-  img.style.display = 'block';
-  document.getElementById('qr-waiting').style.display = 'none';
-  document.getElementById('qr-subtitle').textContent = 'Escaneá con WhatsApp → Dispositivos vinculados';
+  if (img) { img.src = qr; img.style.display = 'block'; }
+  const waiting = document.getElementById('qr-waiting');
+  if (waiting) waiting.style.display = 'none';
+  const subtitle = document.getElementById('qr-subtitle');
+  if (subtitle) subtitle.textContent = 'Abrí WhatsApp → Dispositivos vinculados → Vincular dispositivo';
+  // Actualizar estado y abrir modal
+  updateWAStatus('qr');
   openModal('modal-qr');
 });
 
@@ -342,20 +345,49 @@ function updateWAStatus(status, phone) {
   const pill = document.getElementById('wa-pill');
   const text = document.getElementById('wa-status-text');
   pill.className = `wa-status-pill ${status}`;
+  pill.style.cursor = 'default';
+  pill.onclick = null;
+
   if (status === 'connected' || status === 'open') {
     text.textContent = phone ? `+${phone}` : 'Conectado';
-    pill.onclick = null; // sin acción al hacer click cuando conectado
   } else if (status === 'qr') {
     text.textContent = '📷 Escanear QR';
-    // Click en el pill abre el modal del QR
     pill.onclick = () => openModal('modal-qr');
     pill.style.cursor = 'pointer';
+    // Actualizar el wa-status-card si está visible
+    const card = document.getElementById('wa-status-card');
+    if (card) card.innerHTML = `
+      <p style="margin-bottom:8px">Escaneá el código QR para conectar WhatsApp.</p>
+      <button class="btn-primary btn-sm" onclick="openModal('modal-qr')">📷 Ver QR</button>`;
   } else if (status === 'connecting') {
-    text.textContent = 'Conectando...';
-    pill.onclick = null;
+    text.textContent = '⏳ Conectando...';
   } else {
     text.textContent = 'Desconectado';
-    pill.onclick = null;
+    // Mostrar botón de reconexión en el status card
+    const card = document.getElementById('wa-status-card');
+    if (card) card.innerHTML = `
+      <p style="margin-bottom:8px;color:var(--red)">WhatsApp desconectado. Esperando reconexión...</p>
+      <button class="btn-secondary btn-sm" onclick="checkForQR()">🔍 Verificar QR</button>`;
+  }
+}
+
+// Verificar si hay un QR disponible (útil cuando la sesión se cierra)
+async function checkForQR() {
+  const res = await apiFetch('/wa/qr');
+  if (res?.status === 'qr' && res?.qr) {
+    const img = document.getElementById('qr-image');
+    if (img) { img.src = res.qr; img.style.display = 'block'; }
+    const waiting = document.getElementById('qr-waiting');
+    if (waiting) waiting.style.display = 'none';
+    const subtitle = document.getElementById('qr-subtitle');
+    if (subtitle) subtitle.textContent = 'Escaneá con WhatsApp → Dispositivos vinculados';
+    updateWAStatus('qr');
+    openModal('modal-qr');
+  } else if (res?.status === 'connected') {
+    notify('WhatsApp ya está conectado', 'success');
+    updateWAStatus('connected');
+  } else {
+    notify('Generando QR... esperá unos segundos y volvé a intentar', 'warning');
   }
 }
 
