@@ -137,30 +137,52 @@ router.post('/contacts', requireAuth, async (req, res) => {
 
 router.put('/contacts/:id', requireAuth, async (req, res) => {
   const { name, company, extra, notes } = req.body;
-  await query('UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE id = ?',
+  await query('UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = NOW() WHERE id = ?',
     [name, company, extra, notes, req.params.id]);
-  res.json({ ok: true });
+  // Notificar al frontend que recargue conversaciones (el nombre cambió)
+  res.json({ ok: true, reload: true });
 });
 
 // Guardar contacto desde conversación (upsert por JID/phone)
 router.post('/contacts/from-conversation', requireAuth, async (req, res) => {
   const { jid, name, company, extra, notes } = req.body;
   if (!jid) return res.status(400).json({ error: 'jid requerido' });
-  const phone = normalizePhone(jid.split('@')[0]);
-  await query(
-    'INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
-    [phone, name || phone, company || '', extra || '', notes || '']
-  );
-  await query(
-    'UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE phone = ?',
-    [name || phone, company || '', extra || '', notes || '', phone]
-  );
-  const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [phone]);
-  // Vincular con la conversación
-  if (c) {
-    await query('UPDATE conversations SET contact_id = ? WHERE jid = ?', [c.id, jid]);
+  
+  // Para @lid el "phone" del JID no es real — usar el phone del contacto si ya existe
+  const isLid = jid.endsWith('@lid');
+  const rawPhone = jid.split('@')[0];
+  const phone = isLid ? rawPhone : normalizePhone(rawPhone);
+
+  try {
+    // Upsert PostgreSQL
+    await query(
+      `INSERT INTO contacts (phone, name, company, extra, notes)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (phone) DO UPDATE SET
+         name = EXCLUDED.name,
+         company = COALESCE(NULLIF(EXCLUDED.company,''), contacts.company),
+         extra = COALESCE(NULLIF(EXCLUDED.extra,''), contacts.extra),
+         notes = COALESCE(NULLIF(EXCLUDED.notes,''), contacts.notes),
+         updated_at = NOW()`,
+      [phone, name || '', company || '', extra || '', notes || '']
+    );
+  } catch(e) {
+    // Fallback SQLite
+    await query('INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
+      [phone, name || '', company || '', extra || '', notes || '']);
+    await query('UPDATE contacts SET name=?, company=?, extra=?, notes=?, updated_at=datetime(\'now\') WHERE phone=?',
+      [name || '', company || '', extra || '', notes || '', phone]);
   }
-  res.json(c);
+  
+  const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [phone]);
+  if (c) {
+    // Vincular conversación + actualizar wa_push_name para que aparezca en la lista
+    await query(
+      `UPDATE conversations SET contact_id = ?, wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?`,
+      [c.id, name || null, jid]
+    );
+  }
+  res.json({ ...(c || {}), ok: true });
 });
 
 router.delete('/contacts/:id', requireAuth, requireAdmin, async (req, res) => {

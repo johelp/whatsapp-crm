@@ -859,11 +859,7 @@ async function sendFile(phone, filePath, mimeType, fileName, caption = '', sentB
     message = { document: fileBuffer, mimetype: mimeType, fileName, caption };
   }
 
-  await sock.presenceSubscribe(jid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', jid);
-  await new Promise(r => setTimeout(r, 1000));
-  await sock.sendPresenceUpdate('paused', jid);
-
+  // No usar presenceSubscribe en archivos — puede causar "Esperando mensaje"
   const sent = await sock.sendMessage(jid, message);
 
   const content = caption || `[${fileName}]`;
@@ -916,52 +912,70 @@ async function logout() {
 }
 
 // Fuerza re-sincronización del historial desde el teléfono
-// Método correcto para Baileys: enviar el nodo IQ de dirty sync
+// Usa fetchMessageHistory de Baileys que pide historial por JID específico
 async function requestHistoryResync() {
   if (!sock || connectionStatus !== 'connected') {
     throw new Error('WhatsApp no conectado');
   }
 
-  let triggered = false;
+  console.log('[Resync] Iniciando re-sincronización de historial...');
 
-  // Método 1: dirty sync — le dice al servidor WA que necesitamos historial
+  // Obtener las conversaciones más recientes con sus últimos mensajes
+  const convs = await query(
+    `SELECT c.jid, m.message_id, m.timestamp, m.direction
+     FROM conversations c
+     LEFT JOIN messages m ON m.jid = c.jid
+     WHERE c.jid NOT LIKE '%@g.us%'
+       AND c.jid NOT LIKE '%@lid%'
+       AND m.message_id IS NOT NULL
+     ORDER BY m.timestamp ASC
+     LIMIT 1`
+  ).catch(() => []);
+
+  let requested = 0;
+
+  // Método 1: fetchMessageHistory (Baileys 6.x) — pide historial con el mensaje más antiguo
+  if (sock.fetchMessageHistory && convs.length > 0) {
+    try {
+      const oldest = convs[0];
+      const oldestKey = {
+        remoteJid: oldest.jid,
+        fromMe: oldest.direction === 'out',
+        id: oldest.message_id,
+      };
+      await sock.fetchMessageHistory(50, oldestKey, oldest.timestamp / 1000);
+      requested++;
+      console.log('[Resync] fetchMessageHistory enviado para:', oldest.jid);
+    } catch(e) {
+      console.log('[Resync] fetchMessageHistory falló:', e.message);
+    }
+  }
+
+  // Método 2: dirty sync IQ (fuerza al servidor a marcar historial como pendiente)
   try {
     await sock.sendNode({
       tag: 'iq',
-      attrs: { to: 's.whatsapp.net', type: 'set', id: sock.generateMessageTag?.() || 'resync_1', xmlns: 'urn:xmpp:whatsapp:dirty' },
+      attrs: { to: 's.whatsapp.net', type: 'set',
+               id: sock.generateMessageTag?.() || `resync_${Date.now()}`,
+               xmlns: 'urn:xmpp:whatsapp:dirty' },
       content: [{ tag: 'clean', attrs: { type: 'account_sync' } }]
     });
-    triggered = true;
-    console.log('[Resync] dirty sync enviado');
+    requested++;
+    console.log('[Resync] dirty sync IQ enviado');
   } catch(e) {
     console.log('[Resync] dirty sync falló:', e.message);
   }
 
-  // Método 2: reconectar el socket manteniendo las credenciales
-  // Esto fuerza a Baileys a pedir historial al reconectar con syncFullHistory: true
-  if (!triggered) {
+  // Método 3: desconectar y reconectar para forzar historial inicial
+  // WhatsApp manda messaging-history.set al reconectar con syncFullHistory:true
+  if (requested === 0) {
+    console.log('[Resync] Reconectando para forzar historial...');
     try {
-      if (sock.end) sock.end(new Error('manual_resync'));
-      // connect() tiene reconexión automática con syncFullHistory: true
-      triggered = true;
-      console.log('[Resync] reconexión forzada');
-    } catch(e) {
-      console.log('[Resync] reconexión falló:', e.message);
-    }
+      sock.end(undefined); // desconectar limpiamente (reconexión automática)
+    } catch(e) { /* ignorar */ }
   }
 
-  // Método 3 (fallback garantizado): procesar chats recientes del store en memoria
-  try {
-    const recentChats = await query(
-      `SELECT DISTINCT jid FROM messages
-       ORDER BY timestamp DESC LIMIT 50`
-    );
-    console.log(`[Resync] procesando ${recentChats.length} chats recientes del store`);
-    if (io) {
-      io.emit('history:syncing', { count: recentChats.length });
-    }
-  } catch(e) { /* ignorar */ }
-
+  if (io) io.emit('history:syncing', { requested });
   return true;
 }
 

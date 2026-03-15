@@ -2,7 +2,7 @@
  * sender.js — Cola de envío masivo con protección anti-ban
  */
 const { sendMessage, normalizePhone } = require('./baileys');
-const { query } = require('./db');
+const { query, queryOne } = require('./db');
 
 let activeCampaignId = null;
 let cancelRequested = false;
@@ -58,8 +58,15 @@ async function runCampaign(campaignId, userId) {
     const text = personalize(campaign.template, row);
 
     try {
+      // Buscar el JID real de la conversación (puede ser @lid, @s.whatsapp.net)
+      // Usar el número normalizado como fallback
       const cleanPhone = normalizePhone(row.phone);
-      await sendMessage(cleanPhone, text, userId);
+      const convRow = await queryOne(
+        `SELECT jid FROM conversations WHERE jid LIKE ? OR jid LIKE ? ORDER BY updated_at DESC LIMIT 1`,
+        [`%${cleanPhone}%`, `%${row.phone.replace(/\D/g,'')}%`]
+      );
+      const targetJid = convRow?.jid || cleanPhone;
+      await sendMessage(targetJid, text, userId);
       await query(
         "UPDATE campaign_contacts SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?",
         [row.id]

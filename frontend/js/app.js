@@ -741,11 +741,11 @@ async function saveContactFromChat() {
   if (!S.activeJid) return;
   const conv = S.conversations.find(c => c.jid === S.activeJid);
   const phone = S.activeJid.split('@')[0];
-  const name = conv?.contact_name || '';
+  const name = conv?.wa_push_name || conv?.contact_name || '';
 
   // Si ya tiene nombre real (no es solo el número), confirmar
   if (name && name !== phone) {
-    if (!confirm(`¿Guardar "${name}" (+${phone}) como contacto?`)) return;
+    if (!confirm(`¿Guardar "${name}" como contacto?`)) return;
     const res = await apiFetch('/contacts/from-conversation', {
       method: 'POST',
       body: JSON.stringify({ jid: S.activeJid, name }),
@@ -801,9 +801,11 @@ async function saveContact() {
     await apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(body) });
     closeModal('modal-contact');
     await loadContacts();
+    await loadConversations(); // actualizar nombre en la bandeja inmediatamente
+    if (S.activeJid) openChat(S.activeJid); // refrescar header del chat
     notify('✅ Contacto actualizado');
   } else {
-    await apiFetch('/contacts', { method: 'POST', body: JSON.stringify(body) });
+    const res = await apiFetch('/contacts', { method: 'POST', body: JSON.stringify(body) });
     closeModal('modal-contact');
     await loadContacts();
     notify('✅ Contacto agregado');
@@ -1234,8 +1236,10 @@ function renderCampaignsGrid() {
       <div class="camp-actions">
         ${canStart ? `<button class="btn-primary btn-sm" onclick="startCampaign(${c.id})">▶ Iniciar</button>` : ''}
         ${isActive ? `<button class="btn-danger btn-sm" onclick="cancelActiveCampaign()">⛔ Cancelar</button>` : ''}
-        <button class="btn-secondary btn-sm" onclick="editCampaign(${c.id})">✏️ Editar</button>
+        ${isDone ? `<button class="btn-secondary btn-sm" onclick="editCampaign(${c.id});setTimeout(()=>resetCampaign(),200)">↺ Reutilizar</button>` : ''}
+        <button class="btn-secondary btn-sm" onclick="editCampaign(${c.id})" title="Ver y editar campaña">✏️ Editar</button>
         <button class="btn-secondary btn-sm" onclick="duplicateCampaign(${c.id})" title="Duplicar campaña">⧉</button>
+        <button class="btn-danger btn-sm" onclick="deleteCampaignById(${c.id})" title="Eliminar campaña">🗑</button>
       </div>
     </div>`;
   }).join('');
@@ -1421,7 +1425,13 @@ async function deleteCampaign() {
   const id = document.getElementById('c-id').value;
   const name = document.getElementById('c-name').value;
   if (!id) return;
-  if (!confirm(`¿Eliminar campaña "${name}"? Esta acción no se puede deshacer.`)) return;
+  await deleteCampaignById(parseInt(id), name);
+}
+
+async function deleteCampaignById(id, name) {
+  const c = S.campaigns.find(x => x.id === id);
+  const label = name || c?.name || `#${id}`;
+  if (!confirm(`¿Eliminar campaña "${label}"? Esta acción no se puede deshacer.`)) return;
   const res = await apiFetch(`/campaigns/${id}`, { method: 'DELETE' });
   if (res?.ok) {
     closeModal('modal-campaign');
