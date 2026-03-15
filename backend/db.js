@@ -222,6 +222,7 @@ async function createTables() {
       sent_by INTEGER,
       sender_jid TEXT,
       sender_name TEXT,
+      media_data TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS campaigns (
@@ -405,6 +406,7 @@ async function runMigrations() {
     // Sender en mensajes de grupo
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_data TEXT`,
     // Timezone para auto-reply
     `ALTER TABLE auto_reply_config ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Madrid'`,
   ];

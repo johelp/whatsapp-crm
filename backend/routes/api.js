@@ -11,7 +11,7 @@ const path = require('path');
 const os = require('os');
 
 const { query, queryOne, USE_PG } = require('../db');
-const { sendMessage, sendGroupMessage, sendFile, getStatus, logout, normalizePhone } = require('../baileys');
+const { sendMessage, sendGroupMessage, sendFile, getStatus, logout, normalizePhone, getSock } = require('../baileys');
 const { runCampaign, isRunning, requestCancel } = require('../sender');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 
@@ -311,14 +311,16 @@ router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {
   const msgs = await query(USE_PG ? `
     SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
            m.timestamp::bigint as timestamp,
-           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name, m.created_at,
+           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name,
+           m.media_data, m.created_at,
            u.display_name as sent_by_name, u.color as sent_by_color
     FROM messages m LEFT JOIN users u ON m.sent_by = u.id
     WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
   ` : `
     SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
            m.timestamp,
-           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name, m.created_at,
+           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name,
+           m.media_data, m.created_at,
            u.display_name as sent_by_name, u.color as sent_by_color
     FROM messages m LEFT JOIN users u ON m.sent_by = u.id
     WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
@@ -585,6 +587,65 @@ router.post('/campaigns/:id/import', requireAuth, upload.single('file'), async (
   await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, req.params.id]);
   fs.unlinkSync(req.file.path);
   res.json({ imported: count });
+});
+
+// ─── Media download ──────────────────────────────────────────────────────────
+// Descarga media de WhatsApp en tiempo real usando las claves almacenadas
+
+router.get('/messages/:messageId/media', requireAuth, async (req, res) => {
+  try {
+    const msg = await queryOne(
+      'SELECT media_data, type FROM messages WHERE message_id = ?',
+      [req.params.messageId]
+    );
+    if (!msg?.media_data) return res.status(404).json({ error: 'Media no disponible' });
+
+    const media = JSON.parse(msg.media_data);
+    if (!media?.mediaKey) return res.status(404).json({ error: 'Claves de media no disponibles' });
+
+    // Reconstruir el objeto que necesita Baileys para descargar
+    const downloadable = {
+      mediaKey: Buffer.from(media.mediaKey, 'base64'),
+      url: media.url,
+      directPath: media.directPath,
+      fileEncSha256: media.fileEncSha256 ? Buffer.from(media.fileEncSha256, 'base64') : null,
+      fileSha256: media.fileSha256 ? Buffer.from(media.fileSha256, 'base64') : null,
+    };
+
+    // Mapear tipo de mensaje al tipo de media para Baileys
+    const mediaTypeMap = {
+      imageMessage:    'image',
+      videoMessage:    'video',
+      audioMessage:    'audio',
+      documentMessage: 'document',
+      stickerMessage:  'sticker',
+    };
+    const baileyType = mediaTypeMap[msg.type] || 'document';
+
+    // Importar Baileys dinámicamente (ESM)
+    const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
+
+    const stream = await downloadContentFromMessage(downloadable, baileyType);
+
+    // Setear headers
+    const mimeType = media.mimetype || 'application/octet-stream';
+    res.setHeader('Content-Type', mimeType);
+    if (media.fileName) {
+      res.setHeader('Content-Disposition', `inline; filename="${media.fileName}"`);
+    }
+    if (media.fileLength) {
+      res.setHeader('Content-Length', media.fileLength);
+    }
+
+    // Pipe el stream al response
+    for await (const chunk of stream) {
+      res.write(chunk);
+    }
+    res.end();
+  } catch(e) {
+    console.error('[media download]', e.message);
+    res.status(500).json({ error: 'Error descargando media: ' + e.message });
+  }
 });
 
 // ─── Quick Replies ────────────────────────────────────────────────────────────
@@ -1018,6 +1079,7 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_data TEXT`,
     `ALTER TABLE auto_reply_config ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Madrid'`,
     // Limpiar contactos creados con @lid como teléfono (números raros como 258978055516407)
     // Son contactos cuyo phone no empieza con código de país válido (< 7 dígitos o > 15 dígitos)

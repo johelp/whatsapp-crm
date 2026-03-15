@@ -592,6 +592,76 @@ function renderViewingIndicator(jid) {
   ).join('');
 }
 
+// Renderiza el contenido de un mensaje según su tipo (texto, imagen, audio, etc.)
+function renderMsgContent(m) {
+  const media = m.media_data ? (typeof m.media_data === 'string' ? JSON.parse(m.media_data) : m.media_data) : null;
+  const msgId = m.message_id;
+  const caption = media?.caption ? `<div class="media-caption">${esc(media.caption)}</div>` : '';
+  const text = m.content || '';
+
+  if (media?.type === 'image') {
+    return `<div class="msg-media">
+      <img src="/api/messages/${encodeURIComponent(msgId)}/media"
+           class="msg-image" loading="lazy"
+           onclick="openMediaModal(this.src, 'image')"
+           onerror="this.parentElement.innerHTML='<span class=\"media-error\">🖼 ${esc(text || 'Imagen')}</span>'"
+           alt="Imagen">
+      ${caption}
+    </div>`;
+  }
+
+  if (media?.type === 'video') {
+    return `<div class="msg-media">
+      <video controls class="msg-video" preload="metadata"
+             onerror="this.parentElement.innerHTML='<span class=\"media-error\">🎬 ${esc(text || 'Video')}</span>'">
+        <source src="/api/messages/${encodeURIComponent(msgId)}/media" type="${media.mimetype || 'video/mp4'}">
+      </video>
+      ${caption}
+    </div>`;
+  }
+
+  if (media?.type === 'audio') {
+    const isPtt = media.ptt;
+    const secs = media.seconds || 0;
+    const duration = secs > 0 ? ` · ${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')}` : '';
+    return `<div class="msg-audio">
+      ${isPtt ? '🎤' : '🎵'}<span class="audio-label">${isPtt ? 'Nota de voz' : 'Audio'}${duration}</span>
+      <audio controls preload="none" class="msg-audio-player"
+             onerror="this.parentElement.innerHTML='<span class=\"media-error\">🎵 Audio no disponible</span>'">
+        <source src="/api/messages/${encodeURIComponent(msgId)}/media" type="${media.mimetype || 'audio/ogg'}">
+      </audio>
+    </div>`;
+  }
+
+  if (media?.type === 'document') {
+    const fname = media.fileName || 'archivo';
+    const size = media.fileLength ? ` (${Math.round(media.fileLength/1024)}KB)` : '';
+    return `<div class="msg-document">
+      <a href="/api/messages/${encodeURIComponent(msgId)}/media"
+         target="_blank" class="msg-doc-link" download="${esc(fname)}">
+        📎 ${esc(fname)}${size}
+      </a>
+    </div>`;
+  }
+
+  // Texto plano o tipos sin media
+  return esc(text || m.content || '[mensaje]');
+}
+
+// Modal para ver imágenes en grande
+function openMediaModal(src, type) {
+  let modal = document.getElementById('media-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'media-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:zoom-out';
+    modal.onclick = () => modal.remove();
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `<img src="${src}" style="max-width:90vw;max-height:90vh;border-radius:8px;object-fit:contain">`;
+  modal.style.display = 'flex';
+}
+
 function renderMessages(msgs) {
   const el = document.getElementById('messages-area');
   if (!msgs || !msgs.length) {
@@ -621,15 +691,15 @@ function renderMessages(msgs) {
           ? `<span class="msg-agent" style="background:${m.sent_by_color || '#6366f1'}">${m.sent_by_name[0]}</span>`
           : '');
     const autoTag = m.is_auto_reply ? '<span class="msg-auto-tag">bot</span>' : '';
-    const content = m.content || '[archivo]';
     // En grupos, mostrar quién habló encima del mensaje (solo para mensajes entrantes)
     const senderTag = isGroupChat && m.direction === 'in' && m.sender_name
       ? `<div class="msg-sender-name">${esc(m.sender_name)}</div>`
       : '';
+    const bubbleContent = renderMsgContent(m);
     return `${sep}
     <div class="msg-wrap ${m.direction} ${m.is_auto_reply ? 'auto' : ''} ${isFromMobile ? 'from-device' : ''}">
       ${senderTag}
-      <div class="msg-bubble">${esc(content)}</div>
+      <div class="msg-bubble">${bubbleContent}</div>
       <div class="msg-meta">
         <span class="msg-time">${timeStr}</span>
         ${agentTag}${autoTag}
@@ -674,7 +744,7 @@ function appendMessage(msg) {
 
   wrap.innerHTML = `
     ${senderTag}
-    <div class="msg-bubble">${esc(msg.content || '')}</div>
+    <div class="msg-bubble">${renderMsgContent(msg)}</div>
     <div class="msg-meta">
       <span class="msg-time">${d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}</span>
       ${agentTag}

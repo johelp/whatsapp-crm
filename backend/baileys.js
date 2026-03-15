@@ -77,22 +77,97 @@ async function findContactByPhone(phone) {
 }
 
 function getMessageText(msg) {
-  if (!msg.message) return { type: 'unknown', text: '' };
+  if (!msg.message) return { type: 'unknown', text: '', mediaData: null };
   const type = getContentType(msg.message);
   const m = msg.message;
   let text = '';
+  let mediaData = null;
+
   switch (type) {
-    case 'conversation': text = m.conversation; break;
-    case 'extendedTextMessage': text = m.extendedTextMessage?.text || ''; break;
-    case 'imageMessage': text = m.imageMessage?.caption || '[Imagen]'; break;
-    case 'videoMessage': text = m.videoMessage?.caption || '[Video]'; break;
-    case 'audioMessage': text = '[Audio]'; break;
-    case 'documentMessage': text = `[Archivo: ${m.documentMessage?.fileName || ''}]`; break;
-    case 'stickerMessage': text = '[Sticker]'; break;
-    case 'locationMessage': text = '[Ubicacion]'; break;
-    default: text = `[${type || 'mensaje'}]`;
+    case 'conversation':
+      text = m.conversation;
+      break;
+    case 'extendedTextMessage':
+      text = m.extendedTextMessage?.text || '';
+      break;
+    case 'imageMessage': {
+      const img = m.imageMessage;
+      text = img?.caption || '';
+      mediaData = {
+        type: 'image',
+        mimetype: img?.mimetype || 'image/jpeg',
+        caption: img?.caption || '',
+        url: img?.url || null,
+        directPath: img?.directPath || null,
+        mediaKey: img?.mediaKey ? Buffer.from(img.mediaKey).toString('base64') : null,
+        fileEncSha256: img?.fileEncSha256 ? Buffer.from(img.fileEncSha256).toString('base64') : null,
+        fileSha256: img?.fileSha256 ? Buffer.from(img.fileSha256).toString('base64') : null,
+        fileLength: img?.fileLength || null,
+      };
+      if (!text) text = '[Imagen]';
+      break;
+    }
+    case 'videoMessage': {
+      const vid = m.videoMessage;
+      text = vid?.caption || '[Video]';
+      mediaData = {
+        type: 'video',
+        mimetype: vid?.mimetype || 'video/mp4',
+        caption: vid?.caption || '',
+        url: vid?.url || null,
+        directPath: vid?.directPath || null,
+        mediaKey: vid?.mediaKey ? Buffer.from(vid.mediaKey).toString('base64') : null,
+        fileEncSha256: vid?.fileEncSha256 ? Buffer.from(vid.fileEncSha256).toString('base64') : null,
+        fileSha256: vid?.fileSha256 ? Buffer.from(vid.fileSha256).toString('base64') : null,
+        fileLength: vid?.fileLength || null,
+      };
+      break;
+    }
+    case 'audioMessage': {
+      const aud = m.audioMessage;
+      text = '[Audio]';
+      mediaData = {
+        type: 'audio',
+        mimetype: aud?.mimetype || 'audio/ogg; codecs=opus',
+        ptt: aud?.ptt || false,
+        seconds: aud?.seconds || 0,
+        url: aud?.url || null,
+        directPath: aud?.directPath || null,
+        mediaKey: aud?.mediaKey ? Buffer.from(aud.mediaKey).toString('base64') : null,
+        fileEncSha256: aud?.fileEncSha256 ? Buffer.from(aud.fileEncSha256).toString('base64') : null,
+        fileSha256: aud?.fileSha256 ? Buffer.from(aud.fileSha256).toString('base64') : null,
+        fileLength: aud?.fileLength || null,
+      };
+      break;
+    }
+    case 'documentMessage': {
+      const doc = m.documentMessage;
+      text = `[Archivo: ${doc?.fileName || ''}]`;
+      mediaData = {
+        type: 'document',
+        mimetype: doc?.mimetype || 'application/octet-stream',
+        fileName: doc?.fileName || 'archivo',
+        url: doc?.url || null,
+        directPath: doc?.directPath || null,
+        mediaKey: doc?.mediaKey ? Buffer.from(doc.mediaKey).toString('base64') : null,
+        fileEncSha256: doc?.fileEncSha256 ? Buffer.from(doc.fileEncSha256).toString('base64') : null,
+        fileSha256: doc?.fileSha256 ? Buffer.from(doc.fileSha256).toString('base64') : null,
+        fileLength: doc?.fileLength || null,
+      };
+      break;
+    }
+    case 'stickerMessage':
+      text = '[Sticker]';
+      break;
+    case 'locationMessage': {
+      const loc = m.locationMessage;
+      text = `[Ubicación: ${loc?.degreesLatitude},${loc?.degreesLongitude}]`;
+      break;
+    }
+    default:
+      text = `[${type || 'mensaje'}]`;
   }
-  return { type: type || 'text', text };
+  return { type: type || 'text', text, mediaData };
 }
 
 // ─── Auto-reply bot ───────────────────────────────────────────────────────────
@@ -218,13 +293,14 @@ async function runAutoReplyBot(jid, incomingText, conv) {
 
 // ─── DB helpers ───────────────────────────────────────────────────────────────
 
-async function saveMessage({ message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid = null, sender_name = null }) {
+async function saveMessage({ message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid = null, sender_name = null, media_data = null }) {
   try {
+    const mediaJson = media_data ? JSON.stringify(media_data) : null;
     await query(
-      `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid, sender_name)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO messages (message_id, jid, direction, type, content, timestamp, is_auto_reply, sent_by, sender_jid, sender_name, media_data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (message_id) DO NOTHING`,
-      [message_id, jid, direction, type, content || '', timestamp, is_auto_reply ? 1 : 0, sent_by || null, sender_jid, sender_name]
+      [message_id, jid, direction, type, content || '', timestamp, is_auto_reply ? 1 : 0, sent_by || null, sender_jid, sender_name, mediaJson]
     );
   } catch(e) {
     console.error('[saveMessage] Error:', e.message, '| jid:', jid, '| msg_id:', message_id);
@@ -316,8 +392,8 @@ async function processGroupMessage(msg) {
   const senderJid = msg.key.participant || ''; // quien habló en el grupo
   const senderPhone = senderJid ? normalizePhone(extractPhone(senderJid)) : null;
 
-  const { type, text } = getMessageText(msg);
-  if (!text) return; // ignorar mensajes sin texto (stickers, etc. se pueden agregar después)
+  const { type, text, mediaData } = getMessageText(msg);
+  if (!text && !mediaData) return; // ignorar mensajes completamente vacíos
 
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
   const pushName = msg.pushName || senderPhone || 'Desconocido';
@@ -353,12 +429,13 @@ async function processGroupMessage(msg) {
     jid: groupJid,
     direction: 'in',
     type,
-    content: text,
+    content: text || '',
     timestamp,
     is_auto_reply: 0,
     sent_by: null,
     sender_jid: senderJid,
     sender_name: pushName,
+    media_data: mediaData,
   });
 
   if (io) {
@@ -441,11 +518,12 @@ async function processMessage(msg) {
     ).catch(() => {});
   }
 
-  // Guardar mensaje usando JID original de WhatsApp
+  // Guardar mensaje con metadata de media si aplica
   await saveMessage({
     message_id: msg.key.id,
     jid, direction: 'in', type, content: text,
     timestamp, is_auto_reply: 0, sent_by: null,
+    media_data: mediaData,
   });
 
   // Upsert conversación
@@ -488,8 +566,8 @@ async function processHistoryMessage(msg) {
   const rawJid = msg.key.remoteJid;
   if (rawJid.includes('broadcast')) return;
 
-  const { type, text } = getMessageText(msg);
-  if (!text) return; // ignorar sin contenido textual
+  const { type, text, mediaData } = getMessageText(msg);
+  if (!text && !mediaData) return;
 
   const isGroup = rawJid.endsWith('@g.us');
   const isLid   = rawJid.endsWith('@lid');
@@ -505,10 +583,11 @@ async function processHistoryMessage(msg) {
 
   // Guardar mensaje
   await saveMessage({
-    message_id: msg.key.id, jid, direction, type, content: text,
+    message_id: msg.key.id, jid, direction, type, content: text || '',
     timestamp, is_auto_reply: 0, sent_by: null,
     sender_jid: isGroup ? (msg.key.participant || null) : null,
     sender_name: isGroup ? (msg.pushName || null) : null,
+    media_data: mediaData,
   });
 
   // Upsert conversación (sin incrementar unread — es historial)
