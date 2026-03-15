@@ -862,9 +862,6 @@ async function saveContactFromChat() {
   }
 }
 
-// Override saveContact para manejar el caso from-conversation
-const _origSaveContact = typeof saveContact !== 'undefined' ? saveContact : null;
-
 async function saveContact() {
   const id = document.getElementById('ct-id').value;
   const body = {
@@ -1673,23 +1670,6 @@ function openContactModal(id) {
   document.getElementById('ct-extra').value = c?.extra || '';
   document.getElementById('ct-notes').value = c?.notes || '';
   openModal('modal-contact');
-}
-
-async function saveContact() {
-  const id = document.getElementById('ct-id').value;
-  const body = {
-    phone: document.getElementById('ct-phone').value.replace(/\D/g, ''),
-    name: document.getElementById('ct-name').value,
-    company: document.getElementById('ct-company').value,
-    extra: document.getElementById('ct-extra').value,
-    notes: document.getElementById('ct-notes').value,
-  };
-  if (!body.phone) { notify('El teléfono es obligatorio', 'error'); return; }
-  if (id) await apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(body) });
-  else await apiFetch('/contacts', { method: 'POST', body: JSON.stringify(body) });
-  closeModal('modal-contact');
-  await loadContacts();
-  notify('✅ Contacto guardado');
 }
 
 async function deleteContact(id) {

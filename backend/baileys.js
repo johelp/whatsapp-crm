@@ -54,21 +54,26 @@ function extractPhone(jid) {
   return jid.split('@')[0];
 }
 
-// Busca contacto por número, tolerando variantes con/sin 9
+// Busca contacto por número — tolerante a variantes internacionales
 async function findContactByPhone(phone) {
-  const clean = normalizePhone(phone);
+  const clean = phone.replace(/\D/g, '');
+  
+  // 1. Exacto
   let c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [clean]);
   if (c) return c;
 
-  // Intentar variante: si tiene 549 buscar sin 9, y viceversa
-  let alt = clean;
-  if (clean.startsWith('549')) {
-    alt = '54' + clean.slice(3); // quitar el 9
-  } else if (clean.startsWith('54') && !clean.startsWith('549')) {
-    alt = '549' + clean.slice(2); // agregar el 9
+  // 2. Por los últimos 10 dígitos (suficiente para identificar un número único)
+  //    Cubre variantes con/sin código de país, con/sin 9 argentino, etc.
+  if (clean.length >= 8) {
+    const suffix = clean.slice(-10);
+    c = await queryOne(
+      `SELECT * FROM contacts WHERE phone LIKE ? ORDER BY updated_at DESC LIMIT 1`,
+      [`%${suffix}`]
+    );
+    if (c) return c;
   }
 
-  return await queryOne('SELECT * FROM contacts WHERE phone = ?', [alt]);
+  return null;
 }
 
 function getMessageText(msg) {
@@ -464,14 +469,27 @@ async function processMessage(msg) {
 
   const isLid = rawJid.endsWith('@lid');
   const rawPhone = extractPhone(rawJid);
-  // Si es @lid, el "phone" es el LID numérico interno de WA — NO es un teléfono real.
-  // Lo usamos solo como identificador único para la conversación.
-  const phone = isLid ? rawPhone : normalizePhone(rawPhone);
+  const phone = isLid ? rawPhone : rawPhone.replace(/\D/g, '');
 
-  // JID canónico: @lid se usa tal cual, @s.whatsapp.net se normaliza (Argentina con 9)
-  const jid = isLid ? rawJid : `${phone}@s.whatsapp.net`;
+  // Resolver el JID canónico: buscar si ya existe una conversación con este número
+  // (o con una variante del mismo número) para no crear duplicados
+  let jid = isLid ? rawJid : rawJid; // por defecto usar el JID exacto de WA
+  if (!isLid) {
+    // Buscar conv existente con el JID exacto primero
+    const exactConv = await queryOne('SELECT jid FROM conversations WHERE jid = ?', [rawJid]);
+    if (exactConv) {
+      jid = exactConv.jid;
+    } else {
+      // Buscar por número (puede haber variantes con/sin prefijo 9 de Argentina)
+      const altConv = await queryOne(
+        `SELECT jid FROM conversations WHERE jid LIKE ? ORDER BY updated_at DESC LIMIT 1`,
+        [`%${phone.slice(-10)}%@s.whatsapp.net`]
+      );
+      jid = altConv?.jid || rawJid;
+    }
+  }
 
-  const { type, text } = getMessageText(msg);
+  const { type, text, mediaData } = getMessageText(msg);
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
 
   // Para @lid: NO buscar por teléfono (el LID no es un número real).
@@ -513,16 +531,17 @@ async function processMessage(msg) {
     ).catch(() => {});
   }
 
-  // Guardar mensaje con metadata de media si aplica
+  // Guardar mensaje — content puede ser vacío si es imagen sin caption
+  const contentIn = text || (mediaData ? `[${mediaData.type || 'media'}]` : '');
   await saveMessage({
     message_id: msg.key.id,
-    jid, direction: 'in', type, content: text,
+    jid, direction: 'in', type, content: contentIn,
     timestamp, is_auto_reply: 0, sent_by: null,
     media_data: mediaData,
   });
 
-  // Upsert conversación
-  await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString(), displayName);
+  // Upsert conversación — usar contentIn para el preview de la lista
+  await upsertConversation(jid, contact?.id, contentIn || text, new Date(timestamp).toISOString(), displayName);
 
   const conv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [jid]);
 
@@ -546,7 +565,8 @@ async function processMessage(msg) {
     io.emit('message:new', {
       jid, phone,
       contact_name: contact?.name || msg.pushName || phone,
-      content: text, type, timestamp,
+      content: contentIn || text, type, timestamp,
+      media_data: mediaData,
       is_auto_reply: autoHandled,
       message_id: msg.key.id,
       conversation: convFull,
@@ -634,8 +654,8 @@ async function processOutgoingMessage(msg) {
   const rawJid = msg.key.remoteJid;
   if (!rawJid || rawJid.includes('broadcast')) return;
 
-  const { type, text } = getMessageText(msg);
-  if (!text) return;
+  const { type, text, mediaData } = getMessageText(msg);
+  if (!text && !mediaData && type === 'unknown') return;
 
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
   const isGroup = rawJid.endsWith('@g.us');
@@ -660,17 +680,19 @@ async function processOutgoingMessage(msg) {
   if (exists) return; // ya está registrado, ignorar
 
   // Guardar el mensaje como saliente sin agente asignado (sent_by = null)
+  const contentOut = text || (mediaData ? `[${mediaData.type || 'media'}]` : '[mensaje]');
   await saveMessage({
     message_id: msg.key.id,
     jid,
     direction: 'out',
     type,
-    content: text,
+    content: contentOut,
     timestamp,
     is_auto_reply: 0,
-    sent_by: null, // enviado desde el móvil, no desde el CRM
+    sent_by: null,
     sender_jid: msg.key.participant || null,
     sender_name: null,
+    media_data: mediaData,
   });
 
   // Actualizar last_message de la conversación
