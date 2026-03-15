@@ -39,6 +39,15 @@ const fileUpload = multer({
 
 router.get('/wa/status', (req, res) => res.json(getStatus()));
 
+router.get('/wa/qr', requireAuth, async (req, res) => {
+  const { status, qr } = getStatus();
+  if (status === 'qr' && qr) {
+    res.json({ qr, status });
+  } else {
+    res.json({ status, qr: null });
+  }
+});
+
 router.post('/wa/logout', requireAuth, requireAdmin, async (req, res) => {
   await logout();
   res.json({ ok: true });

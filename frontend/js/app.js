@@ -62,6 +62,21 @@ async function init() {
   if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission();
   }
+
+  // Si WA está en estado QR, buscar la imagen actual via HTTP
+  // (por si el socket se reconectó después de que el QR fue emitido)
+  const waStatus = await apiFetch('/wa/qr');
+  if (waStatus?.status === 'qr' && waStatus?.qr) {
+    const img = document.getElementById('qr-image');
+    if (img) {
+      img.src = waStatus.qr;
+      img.style.display = 'block';
+      const waiting = document.getElementById('qr-waiting');
+      if (waiting) waiting.style.display = 'none';
+    }
+    updateWAStatus('qr');
+    openModal('modal-qr');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -87,8 +102,23 @@ async function apiFetch(path, opts = {}) {
 // SOCKET.IO
 // ═══════════════════════════════════════════════════════════════
 
-socket.on('wa:status', ({ status, phone }) => {
+socket.on('wa:status', ({ status, phone, qr }) => {
   updateWAStatus(status, phone);
+
+  // Si llega con QR adjunto (usuario abrió el browser cuando el QR ya existía)
+  if (status === 'qr' && qr) {
+    const img = document.getElementById('qr-image');
+    if (img) {
+      img.src = qr;
+      img.style.display = 'block';
+      const waiting = document.getElementById('qr-waiting');
+      if (waiting) waiting.style.display = 'none';
+      const subtitle = document.getElementById('qr-subtitle');
+      if (subtitle) subtitle.textContent = 'Escaneá con WhatsApp → Dispositivos vinculados';
+    }
+    openModal('modal-qr');
+  }
+
   // Cuando conecta, mostrar banner de sincronización
   if (status === 'open' || status === 'connected') {
     // Mostrar banner de sync solo si no hay datos cargados todavía
@@ -312,10 +342,21 @@ function updateWAStatus(status, phone) {
   const pill = document.getElementById('wa-pill');
   const text = document.getElementById('wa-status-text');
   pill.className = `wa-status-pill ${status}`;
-  if (status === 'connected') text.textContent = phone ? `+${phone}` : 'Conectado';
-  else if (status === 'qr') text.textContent = 'Escanear QR';
-  else if (status === 'connecting') text.textContent = 'Conectando...';
-  else text.textContent = 'Desconectado';
+  if (status === 'connected' || status === 'open') {
+    text.textContent = phone ? `+${phone}` : 'Conectado';
+    pill.onclick = null; // sin acción al hacer click cuando conectado
+  } else if (status === 'qr') {
+    text.textContent = '📷 Escanear QR';
+    // Click en el pill abre el modal del QR
+    pill.onclick = () => openModal('modal-qr');
+    pill.style.cursor = 'pointer';
+  } else if (status === 'connecting') {
+    text.textContent = 'Conectando...';
+    pill.onclick = null;
+  } else {
+    text.textContent = 'Desconectado';
+    pill.onclick = null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
