@@ -24,23 +24,6 @@ let qrData = null;
 let connectionStatus = 'disconnected';
 let reconnectTimer = null;
 
-// Cache de metadata de grupos en memoria
-const _groupCache = new Map();
-
-// Obtener metadata de un grupo con cache
-async function getGroupMetadata(jid) {
-  if (_groupCache.has(jid)) return _groupCache.get(jid);
-  try {
-    if (!sock) return null;
-    const meta = await sock.groupMetadata(jid);
-    _groupCache.set(jid, meta);
-    return meta;
-  } catch (e) {
-    console.error('[grupos] Error metadata', jid, e.message);
-    return null;
-  }
-}
-
 function setIO(socketIO) { io = socketIO; }
 function getStatus() { return { status: connectionStatus, qr: qrData }; }
 function getSock() { return sock; }
@@ -249,50 +232,80 @@ async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pu
   }
 }
 
-// ─── Process GROUP message ────────────────────────────────────────────────────
 
+// ─── Grupos ───────────────────────────────────────────────────────────────────
+
+// Cache de metadata de grupos en memoria (jid → {subject, participants, ...})
+const _groupCache = new Map();
+
+async function getGroupMetadata(jid) {
+  if (_groupCache.has(jid)) return _groupCache.get(jid);
+  try {
+    if (!sock) return null;
+    const meta = await sock.groupMetadata(jid);
+    if (meta) _groupCache.set(jid, meta);
+    return meta;
+  } catch(e) {
+    return null;
+  }
+}
+
+async function upsertGroup(jid, subject, description) {
+  // Upsert en tabla conversations con flag is_group y nombre del grupo
+  try {
+    await query(
+      `INSERT INTO conversations (jid, is_group, group_name, last_message_at)
+       VALUES (?, 1, ?, NOW())
+       ON CONFLICT (jid) DO UPDATE SET
+         is_group = 1,
+         group_name = COALESCE(EXCLUDED.group_name, conversations.group_name)`,
+      [jid, subject || jid.split('@')[0]]
+    );
+  } catch(e) {
+    // ignorar
+  }
+}
+
+// Procesar mensaje de grupo
 async function processGroupMessage(msg) {
-  if (!msg.message) return;
+  if (!msg.message || msg.key.fromMe) return;
 
-  const groupJid = msg.key.remoteJid; // xxx@g.us
-  const senderJid = msg.key.participant || msg.participant || '';
+  const groupJid = msg.key.remoteJid; // formato: XXXXX@g.us
+  const senderJid = msg.key.participant || ''; // quien habló en el grupo
+  const senderPhone = senderJid ? normalizePhone(extractPhone(senderJid)) : null;
+
   const { type, text } = getMessageText(msg);
-  if (!text) return;
+  if (!text) return; // ignorar mensajes sin texto (stickers, etc. se pueden agregar después)
 
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+  const pushName = msg.pushName || senderPhone || 'Desconocido';
 
-  // Obtener metadata del grupo con cache
-  const meta = await getGroupMetadata(groupJid);
-  const groupName = meta?.subject || groupJid;
+  // Obtener o crear metadata del grupo
+  let groupName = groupJid.split('@')[0];
+  try {
+    const meta = await getGroupMetadata(groupJid);
+    if (meta?.subject) groupName = meta.subject;
+  } catch(e) {}
 
-  // Nombre del sender: pushName > participante > número
-  let senderName = msg.pushName || senderJid.replace(/@.+$/, '');
-  if (!msg.pushName && meta?.participants) {
-    const p = meta.participants.find(p => p.id === senderJid || p.id.split(':')[0] + '@s.whatsapp.net' === senderJid);
-    if (p?.name) senderName = p.name;
+  // Asegurar que existe la conversación de grupo
+  try {
+    await query(
+      `INSERT INTO conversations (jid, is_group, group_name, last_message, last_message_at, unread_count)
+       VALUES (?, 1, ?, ?, NOW(), 1)
+       ON CONFLICT (jid) DO UPDATE SET
+         is_group = 1,
+         group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
+         last_message = EXCLUDED.last_message,
+         last_message_at = NOW(),
+         unread_count = conversations.unread_count + 1,
+         updated_at = NOW()`,
+      [groupJid, groupName, text]
+    );
+  } catch(e) {
+    console.error('Error upsert grupo:', e.message);
   }
 
-  // Upsert conversación del grupo
-  const existing = await queryOne('SELECT id, unread_count FROM conversations WHERE jid = ?', [groupJid]);
-  if (existing) {
-    await query(
-      `UPDATE conversations SET
-        group_name = ?, is_group = 1,
-        last_message = ?, last_message_at = ?,
-        unread_count = unread_count + 1,
-        updated_at = datetime('now')
-       WHERE jid = ?`,
-      [groupName, text, new Date(timestamp).toISOString(), groupJid]
-    );
-  } else {
-    await query(
-      `INSERT INTO conversations (jid, group_name, is_group, last_message, last_message_at, unread_count)
-       VALUES (?, ?, 1, ?, ?, 1)`,
-      [groupJid, groupName, text, new Date(timestamp).toISOString()]
-    );
-  }
-
-  // Guardar mensaje con sender_jid y sender_name
+  // Guardar mensaje con info del sender
   await saveMessage({
     message_id: msg.key.id,
     jid: groupJid,
@@ -303,27 +316,20 @@ async function processGroupMessage(msg) {
     is_auto_reply: 0,
     sent_by: null,
     sender_jid: senderJid,
-    sender_name: senderName,
+    sender_name: pushName,
   });
-
-  const conv = await queryOne(`
-    SELECT cv.*, cv.group_name as contact_name
-    FROM conversations cv WHERE cv.jid = ?`, [groupJid]);
 
   if (io) {
     io.emit('message:new', {
       jid: groupJid,
-      phone: groupJid,
-      contact_name: groupName,
+      is_group: true,
+      group_name: groupName,
+      sender_jid: senderJid,
+      sender_name: pushName,
       content: text,
       type,
       timestamp,
-      is_auto_reply: false,
       message_id: msg.key.id,
-      sender_jid: senderJid,
-      sender_name: senderName,
-      is_group: true,
-      conversation: conv,
     });
   }
 }
@@ -335,49 +341,55 @@ async function processMessage(msg) {
 
   const rawJid = msg.key.remoteJid;
   if (!rawJid || rawJid.includes('broadcast')) return;
+  
+  // Grupos: procesar separado con contexto de grupo
+  if (rawJid.endsWith('@g.us')) {
+    await processGroupMessage(msg);
+    return;
+  }
 
-  // Derivar mensajes de grupos a su procesador dedicado
-  if (rawJid.endsWith('@g.us')) return processGroupMessage(msg);
-
+  const isLid = rawJid.endsWith('@lid');
   const rawPhone = extractPhone(rawJid);
-  const phone = normalizePhone(rawPhone);
+  // Si es @lid, el "phone" es el LID numérico interno de WA — NO es un teléfono real.
+  // Lo usamos solo como identificador único para la conversación.
+  const phone = isLid ? rawPhone : normalizePhone(rawPhone);
 
-  // Normalizar el JID: usar siempre el número normalizado (con 9 para Argentina)
-  // Esto evita que 543412824082 y 5493412824082 generen dos conversaciones distintas
-  const suffix = rawJid.includes('@lid') ? '@lid' : '@s.whatsapp.net';
-  const jid = rawJid.includes('@lid') ? rawJid : `${phone}${suffix}`;
+  // JID canónico: @lid se usa tal cual, @s.whatsapp.net se normaliza (Argentina con 9)
+  const jid = isLid ? rawJid : `${phone}@s.whatsapp.net`;
 
   const { type, text } = getMessageText(msg);
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
 
-  // Buscar contacto existente (tolerando variantes con/sin 9)
-  let contact = await findContactByPhone(phone);
-
-  if (!contact) {
-    // Crear contacto nuevo — nombre solo si hay pushName (no poner el teléfono como nombre)
-    const contactName = msg.pushName || null;
-    try {
-      const rows = await query(
-        `INSERT INTO contacts (phone, name) VALUES (?, ?)
-         ON CONFLICT (phone) DO UPDATE SET
-           name = CASE
-             WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
-             ELSE contacts.name
-           END
-         RETURNING id, name, phone`,
-        [phone, contactName]
-      );
-      contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
-    } catch (e) {
-      // Fallback SQLite
-      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
-      contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+  // Para @lid: NO buscar por teléfono (el LID no es un número real).
+  // Solo buscamos/creamos contacto para JIDs con número real.
+  let contact = null;
+  if (!isLid) {
+    contact = await findContactByPhone(phone);
+    if (!contact) {
+      const contactName = msg.pushName || null;
+      try {
+        const rows = await query(
+          `INSERT INTO contacts (phone, name) VALUES (?, ?)
+           ON CONFLICT (phone) DO UPDATE SET
+             name = CASE
+               WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
+               ELSE contacts.name
+             END
+           RETURNING id, name, phone`,
+          [phone, contactName]
+        );
+        contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+      } catch (e) {
+        await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
+        contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+      }
+    } else if (msg.pushName && (!contact.name || contact.name === phone || contact.name === contact.phone)) {
+      await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
+      contact.name = msg.pushName;
     }
-  } else if (msg.pushName && (!contact.name || contact.name === phone || contact.name === contact.phone)) {
-    // Actualizar nombre si: era null, o era igual al teléfono (fallback anterior)
-    await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
-    contact.name = msg.pushName;
   }
+  // Para @lid: el nombre visible es siempre el pushName de WhatsApp
+  const displayName = msg.pushName || (contact?.name) || phone;
 
   // Actualizar contact_id en conversación si faltaba
   if (contact?.id) {
@@ -395,7 +407,7 @@ async function processMessage(msg) {
   });
 
   // Upsert conversación
-  await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString(), msg.pushName || null);
+  await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString(), displayName);
 
   const conv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [jid]);
 
@@ -496,15 +508,17 @@ async function connect() {
       try {
         if (!msg.message || !msg.key?.remoteJid) continue;
         const rawJid = msg.key.remoteJid;
-        if (rawJid.includes('broadcast') || rawJid.endsWith('@g.us')) continue;
+        if (rawJid.includes('broadcast')) continue;
+        // Grupos: guardar con flag is_group
+        const isGroup = rawJid.endsWith('@g.us');
 
         const { type, text } = getMessageText(msg);
         if (!text) continue;
 
         const rawPhone = extractPhone(rawJid);
         const phone = normalizePhone(rawPhone);
-        // Normalizar JID igual que en processMessage
-        const jid = rawJid.includes('@lid') ? rawJid : `${phone}@s.whatsapp.net`;
+        // Normalizar JID: grupos usan su JID original, individuales se normalizan
+        const jid = isGroup ? rawJid : (rawJid.includes('@lid') ? rawJid : `${phone}@s.whatsapp.net`);
 
         const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
         const direction = msg.key.fromMe ? 'out' : 'in';
@@ -538,8 +552,26 @@ async function connect() {
           contact.name = msg.pushName;
         }
 
-        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: text, timestamp, is_auto_reply: 0, sent_by: null });
-        await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
+        const senderJidHist = isGroup ? (msg.key.participant || '') : null;
+        const senderNameHist = isGroup ? (msg.pushName || null) : null;
+        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: text, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: senderJidHist, sender_name: senderNameHist });
+        if (isGroup) {
+          // Para grupos usar upsertGroup en vez del upsert normal
+          let groupName = jid.split('@')[0];
+          try { const meta = await getGroupMetadata(jid); if (meta?.subject) groupName = meta.subject; } catch(e) {}
+          await query(
+            `INSERT INTO conversations (jid, is_group, group_name, last_message, last_message_at)
+             VALUES (?, 1, ?, ?, ?)
+             ON CONFLICT (jid) DO UPDATE SET
+               is_group = 1,
+               group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
+               last_message = CASE WHEN EXCLUDED.last_message_at >= conversations.last_message_at THEN EXCLUDED.last_message ELSE conversations.last_message END,
+               last_message_at = GREATEST(conversations.last_message_at, EXCLUDED.last_message_at)`,
+            [jid, groupName, text, new Date(timestamp).toISOString()]
+          ).catch(() => {});
+        } else {
+          await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
+        }
         imported++;
       } catch (e) {
         // silencioso — mensajes históricos no deben crashear
@@ -551,46 +583,38 @@ async function connect() {
     }
   });
 
+  // Actualizar cache de grupos cuando cambian
+  sock.ev.on('groups.update', async (updates) => {
+    for (const update of updates) {
+      if (!update.id) continue;
+      _groupCache.delete(update.id); // invalidar cache
+      if (update.subject) {
+        await query(
+          `UPDATE conversations SET group_name = ? WHERE jid = ?`,
+          [update.subject, update.id]
+        ).catch(() => {});
+        if (io) io.emit('group:updated', { jid: update.id, group_name: update.subject });
+      }
+    }
+  });
+
+  // Cuando entramos a un grupo o se actualiza lista
+  sock.ev.on('groups.upsert', async (groups) => {
+    for (const group of groups) {
+      _groupCache.set(group.id, group);
+      await query(
+        `INSERT INTO conversations (jid, is_group, group_name, last_message_at)
+         VALUES (?, 1, ?, NOW())
+         ON CONFLICT (jid) DO UPDATE SET is_group = 1, group_name = COALESCE(EXCLUDED.group_name, conversations.group_name)`,
+        [group.id, group.subject || group.id.split('@')[0]]
+      ).catch(() => {});
+    }
+  });
+
   sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
     if (type !== 'notify') return;
     for (const msg of msgs) {
       await processMessage(msg).catch(e => console.error('Error procesando mensaje:', e.message));
-    }
-  });
-
-  // ─── Eventos de grupos ─────────────────────────────────────────────────────
-
-  // Cambio de nombre, descripción, etc.
-  sock.ev.on('groups.update', async (updates) => {
-    for (const update of updates) {
-      if (!update.id) continue;
-      if (update.subject) {
-        // Actualizar cache
-        const cached = _groupCache.get(update.id);
-        if (cached) _groupCache.set(update.id, { ...cached, subject: update.subject });
-        // Actualizar DB
-        await query(
-          `UPDATE conversations SET group_name = ?, updated_at = datetime('now') WHERE jid = ?`,
-          [update.subject, update.id]
-        ).catch(() => {});
-        if (io) io.emit('group:updated', { jid: update.id, name: update.subject });
-      }
-    }
-  });
-
-  // Grupos nuevos a los que el teléfono fue agregado
-  sock.ev.on('groups.upsert', async (groups) => {
-    for (const group of groups) {
-      _groupCache.set(group.id, group);
-      // Si ya existe la conv, actualizar nombre
-      const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [group.id]);
-      if (existing) {
-        await query(
-          `UPDATE conversations SET group_name = ?, is_group = 1, updated_at = datetime('now') WHERE jid = ?`,
-          [group.subject, group.id]
-        ).catch(() => {});
-        if (io) io.emit('group:updated', { jid: group.id, name: group.subject });
-      }
     }
   });
 }
@@ -602,32 +626,25 @@ async function sendMessage(phone, text, sentBy = null) {
     throw new Error('WhatsApp no está conectado');
   }
 
-  // JID base normalizado (el que tenemos en nuestra DB)
-  const baseJid = normalizeJid(phone);
-
-  // Resolver el JID real de WhatsApp — puede diferir del nuestro (Business ID, @lid, etc.)
-  let sendJid = baseJid;
-  try {
-    const [result] = await sock.onWhatsApp(baseJid);
-    if (result?.exists && result?.jid) {
-      sendJid = result.jid; // JID real para el envío
-    }
-  } catch(e) {
-    // Si onWhatsApp falla, seguir con el JID normalizado
+  // Determinar el JID correcto para enviar.
+  // Si 'phone' ya contiene '@' es un JID completo (puede ser @lid, @s.whatsapp.net, @g.us)
+  // Si no, normalizar como número argentino → @s.whatsapp.net
+  // NUNCA llamar onWhatsApp() — causa "Esperando mensaje" en el destinatario
+  // cuando resuelve un @lid y el envío queda en modo pendiente.
+  let convJid;
+  if (phone.includes('@')) {
+    convJid = phone; // ya es JID completo
+  } else {
+    convJid = normalizeJid(phone);
   }
 
-  await sock.presenceSubscribe(sendJid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', sendJid);
+  await sock.presenceSubscribe(convJid).catch(() => {});
+  await sock.sendPresenceUpdate('composing', convJid);
   const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
   await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', sendJid);
+  await sock.sendPresenceUpdate('paused', convJid);
 
-  const sent = await sock.sendMessage(sendJid, { text });
-
-  // Para guardar en DB siempre usar el JID que tenemos en conversaciones (baseJid)
-  // Si el JID de envío difiere, buscar la conv por el JID base
-  // Esto evita crear conversaciones duplicadas con JIDs raros de WhatsApp Business
-  const convJid = baseJid;
+  const sent = await sock.sendMessage(convJid, { text });
 
   await saveMessage({
     message_id: sent.key.id,
@@ -673,60 +690,6 @@ async function sendMessage(phone, text, sentBy = null) {
       sent_by: sentBy,
       sent_by_name: sentByName,
       sent_by_color: sentByColor,
-    });
-  }
-
-  return sent;
-}
-
-async function sendGroupMessage(groupJid, text, sentBy = null) {
-  if (!sock || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp no está conectado');
-  }
-
-  await sock.presenceSubscribe(groupJid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', groupJid);
-  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
-  await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', groupJid);
-
-  const sent = await sock.sendMessage(groupJid, { text });
-
-  // Obtener nombre del grupo para la DB
-  const meta = await getGroupMetadata(groupJid);
-  const groupName = meta?.subject || groupJid;
-  const timestamp = Date.now();
-
-  await saveMessage({
-    message_id: sent.key.id,
-    jid: groupJid, direction: 'out', type: 'text',
-    content: text, timestamp,
-    is_auto_reply: 0, sent_by: sentBy,
-  });
-
-  // Actualizar last_message de la conversación del grupo
-  await query(
-    `UPDATE conversations SET last_message = ?, last_message_at = datetime('now'), group_name = ?, is_group = 1, updated_at = datetime('now') WHERE jid = ?`,
-    [text, groupName, groupJid]
-  ).catch(() => {});
-
-  if (io) {
-    let sentByName = null, sentByColor = null;
-    if (sentBy) {
-      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
-      sentByName = user?.display_name || null;
-      sentByColor = user?.color || null;
-    }
-    io.emit('message:sent', {
-      jid: groupJid,
-      content: text,
-      timestamp,
-      direction: 'out',
-      type: 'text',
-      sent_by: sentBy,
-      sent_by_name: sentByName,
-      sent_by_color: sentByColor,
-      is_group: true,
     });
   }
 
@@ -797,7 +760,6 @@ async function logout() {
     sock = null;
   }
   if (reconnectTimer) clearTimeout(reconnectTimer);
-  _groupCache.clear();
   if (fs.existsSync(AUTH_PATH)) {
     fs.rmSync(AUTH_PATH, { recursive: true, force: true });
     fs.mkdirSync(AUTH_PATH, { recursive: true });
@@ -832,6 +794,66 @@ async function requestHistoryResync() {
     });
   }
   return true;
+}
+
+
+// ─── Enviar mensaje a grupo ────────────────────────────────────────────────────
+
+async function sendGroupMessage(groupJid, text, sentBy = null) {
+  if (!sock || connectionStatus !== 'connected') {
+    throw new Error('WhatsApp no está conectado');
+  }
+  if (!groupJid.endsWith('@g.us')) throw new Error('JID de grupo inválido');
+
+  // Indicador de escritura en el grupo
+  await sock.sendPresenceUpdate('composing', groupJid).catch(() => {});
+  const typingMs = Math.min(Math.max(text.length * 20, 600), 2500);
+  await new Promise(r => setTimeout(r, typingMs));
+  await sock.sendPresenceUpdate('paused', groupJid).catch(() => {});
+
+  const sent = await sock.sendMessage(groupJid, { text });
+
+  // Guardar en DB como mensaje saliente del grupo
+  await saveMessage({
+    message_id: sent.key.id,
+    jid: groupJid,
+    direction: 'out',
+    type: 'text',
+    content: text,
+    timestamp: Date.now(),
+    is_auto_reply: 0,
+    sent_by: sentBy,
+    sender_jid: null,
+    sender_name: null,
+  });
+
+  // Actualizar última conversación del grupo
+  await query(
+    `UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`,
+    [text, groupJid]
+  ).catch(() => {});
+
+  if (io) {
+    let sentByName = null, sentByColor = null;
+    if (sentBy) {
+      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
+      sentByName = user?.display_name || null;
+      sentByColor = user?.color || null;
+    }
+    io.emit('message:sent', {
+      jid: groupJid,
+      is_group: true,
+      content: text,
+      timestamp: Date.now(),
+      direction: 'out',
+      type: 'text',
+      sent_by: sentBy,
+      sent_by_name: sentByName,
+      sent_by_color: sentByColor,
+    });
+  }
+
+  return sent;
 }
 
 module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };

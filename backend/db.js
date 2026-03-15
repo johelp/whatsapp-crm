@@ -190,6 +190,8 @@ async function createTables() {
       jid TEXT UNIQUE NOT NULL,
       contact_id INTEGER,
       wa_push_name TEXT,
+      is_group INTEGER DEFAULT 0,
+      group_name TEXT,
       status TEXT DEFAULT 'open',
       assigned_to INTEGER,
       unread_count INTEGER DEFAULT 0,
@@ -197,6 +199,7 @@ async function createTables() {
       last_message_at TEXT,
       bot_state TEXT DEFAULT 'idle',
       bot_collected TEXT DEFAULT '{}',
+      ai_disabled INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     )`,
@@ -217,6 +220,8 @@ async function createTables() {
       is_read INTEGER DEFAULT 0,
       is_auto_reply INTEGER DEFAULT 0,
       sent_by INTEGER,
+      sender_jid TEXT,
+      sender_name TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS campaigns (
@@ -394,10 +399,10 @@ async function runMigrations() {
     )`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
-    // ── v2: Grupos WhatsApp ──────────────────────────────────────
+    // Grupos
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
-    // ── v2: Sender por mensaje (grupos multi-participante) ───────
+    // Sender en mensajes de grupo
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
   ];

@@ -100,56 +100,52 @@ socket.on('wa:qr', ({ qr }) => {
 });
 
 socket.on('message:new', async (data) => {
-  // Actualización quirúrgica: mover la conversación al tope en S.conversations
-  const idx = S.conversations.findIndex(c => c.jid === data.jid);
-  if (idx !== -1) {
-    // Actualizar campos de la conv existente
-    S.conversations[idx].last_message = data.content;
-    S.conversations[idx].last_message_at = new Date(data.timestamp).toISOString();
-    if (data.jid !== S.activeJid) {
-      S.conversations[idx].unread_count = (S.conversations[idx].unread_count || 0) + 1;
-    }
-    // Mover al tope
-    const conv = S.conversations.splice(idx, 1)[0];
+  // Actualización quirúrgica: solo mover la conv al tope y actualizar preview
+  // sin recargar TODA la lista (evita flicker y es instantáneo)
+  const existingIdx = S.conversations.findIndex(c => c.jid === data.jid);
+  if (existingIdx !== -1) {
+    const conv = { ...S.conversations[existingIdx] };
+    conv.last_message   = data.content;
+    conv.last_message_at = new Date().toISOString();
+    if (S.activeJid !== data.jid) conv.unread_count = (conv.unread_count || 0) + 1;
+    S.conversations.splice(existingIdx, 1);
     S.conversations.unshift(conv);
     renderConversationList();
   } else {
-    // Conv nueva — hacer fetch completo solo en este caso
+    // Nueva conversación — recargar desde servidor para tener todos los datos
     await loadConversations();
   }
 
-  // Si es el chat activo, agregar mensaje
+  // Si es el chat activo, agregar mensaje al área de chat
   if (S.activeJid === data.jid) {
-    // Solo agregar si no es un duplicado (el optimistic UI ya lo puso para mensajes salientes)
     appendMessage({
       direction: 'in',
       content: data.content,
       timestamp: data.timestamp,
-      is_auto_reply: data.is_auto_reply || 0,
+      is_auto_reply: 0,
       sender_name: data.sender_name || null,
-      is_group: data.is_group || false,
+      sender_jid:  data.sender_jid  || null,
     });
     apiFetch(`/conversations/${encodeURIComponent(data.jid)}/read`, { method: 'POST' });
   } else {
-    // Notificación
-    showDesktopNotif(data.contact_name, data.content);
-    notify(`💬 ${data.contact_name}: ${data.content.substring(0, 60)}`);
+    const name = data.group_name || data.contact_name || data.jid?.split('@')[0];
+    const preview = data.sender_name ? `${data.sender_name}: ${data.content}` : data.content;
+    showDesktopNotif(name, preview);
+    notify(`${data.is_group ? '👥' : '💬'} ${name}: ${preview.substring(0, 60)}`);
   }
 });
 
 socket.on('message:sent', (data) => {
-  // Actualización quirúrgica de la lista (sin reload)
-  const idx = S.conversations.findIndex(c => c.jid === data.jid);
-  if (idx !== -1) {
-    S.conversations[idx].last_message = data.content;
-    S.conversations[idx].last_message_at = new Date(data.timestamp).toISOString();
-    const conv = S.conversations.splice(idx, 1)[0];
+  // Actualización quirúrgica del preview en la lista
+  const existingIdx = S.conversations.findIndex(c => c.jid === data.jid);
+  if (existingIdx !== -1) {
+    const conv = { ...S.conversations[existingIdx] };
+    conv.last_message    = data.content;
+    conv.last_message_at = new Date().toISOString();
+    S.conversations.splice(existingIdx, 1);
     S.conversations.unshift(conv);
     renderConversationList();
-  } else {
-    loadConversations();
   }
-
   // Si el chat está abierto y el mensaje lo envió OTRO agente (no yo), mostrarlo
   if (S.activeJid === data.jid && data.sent_by !== S.me?.id) {
     appendMessage({
@@ -166,16 +162,15 @@ socket.on('message:sent', (data) => {
 
 socket.on('users:online', (users) => renderOnlineAgents(users));
 
-socket.on('group:updated', ({ jid, name }) => {
-  const idx = S.conversations.findIndex(c => c.jid === jid);
-  if (idx !== -1) {
-    S.conversations[idx].group_name = name;
-    S.conversations[idx].contact_name = name;
+socket.on('group:updated', ({ jid, group_name }) => {
+  const conv = S.conversations.find(c => c.jid === jid);
+  if (conv) {
+    conv.contact_name = group_name;
+    conv.group_name   = group_name;
     renderConversationList();
-    // Si es la conv activa actualizar el header
+    // Actualizar header si el grupo está activo
     if (S.activeJid === jid) {
-      const el = document.getElementById('ch-name');
-      if (el) el.textContent = name;
+      document.getElementById('ch-name').textContent = group_name;
     }
   }
 });
@@ -184,8 +179,8 @@ socket.on('history:synced', ({ count }) => {
   hideSyncBanner();
   notify(`📥 ${count} mensajes importados desde WhatsApp`);
   loadConversations();
-  // Recargar mensajes del chat activo (loadMessages no existe — usar openChat)
-  if (S.activeJid) openChat(S.activeJid);
+  // Si hay conversación activa, recargar sus mensajes
+  if (S.activeJid) loadMessages(S.activeJid);
 });
 
 socket.on('typing:remote', ({ jid, user }) => {
@@ -410,27 +405,23 @@ function renderConversationList() {
   }
 
   el.innerHTML = convs.map(c => {
-    const isGroup = c.jid.endsWith('@g.us');
-    const name = isGroup
-      ? (c.group_name || c.contact_name || c.jid)
-      : (c.contact_name || c.contact_phone || c.jid.split('@')[0]);
+    const isGroup = c.is_group == 1 || c.jid?.endsWith('@g.us');
+    const name = c.contact_name || (isGroup ? (c.group_name || c.jid?.split('@')[0]) : c.contact_phone) || c.jid?.split('@')[0];
     const avatar = isGroup ? '👥' : (name[0]?.toUpperCase() || '?');
-    const groupBadge = isGroup
-      ? `<span class="group-badge">grupo</span>`
-      : '';
+    const avatarStyle = isGroup ? 'font-size:18px;display:flex;align-items:center;justify-content:center;background:var(--surface3)' : '';
     const labels = (c.labels || []).map(l =>
       `<span class="label-pill" style="background:${l.color}" title="${esc(l.name)}"></span>`
     ).join('');
     const assignedChip = c.assigned_name
       ? `<span class="assigned-chip" style="background:${c.assigned_color}">${c.assigned_name[0]}</span>`
       : '';
+    const groupBadge = isGroup ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">grupo</span>` : '';
     return `
-    <div class="chat-item ${c.jid === S.activeJid ? 'active' : ''}" onclick="openChat('${esc(c.jid)}')">
-      <div class="chat-avatar">${avatar}</div>
+    <div class="chat-item ${c.jid === S.activeJid ? 'active' : ''}" onclick="openChat('${c.jid}')">
+      <div class="chat-avatar" style="${avatarStyle}">${avatar}</div>
       <div class="chat-body">
         <div class="chat-name-row">
-          <span class="chat-name">${esc(name)}</span>
-          ${groupBadge}
+          <span class="chat-name">${esc(name)}${groupBadge}</span>
           <span class="chat-time">${fmtTime(c.last_message_at)}</span>
         </div>
         <div class="chat-preview">${esc(c.last_message || '')}</div>
@@ -487,25 +478,30 @@ async function openChat(jid) {
   document.getElementById('chat-active').style.height = '100%';
 
   const conv = S.conversations.find(c => c.jid === jid);
-  const isGroup = jid.endsWith('@g.us');
+  const isGroup = jid.endsWith('@g.us') || conv?.is_group == 1;
+  const phone = jid.split('@')[0];
 
-  let displayName, subLine;
+  let displayName;
   if (isGroup) {
-    displayName = conv?.group_name || conv?.contact_name || jid;
-    subLine = 'Grupo de WhatsApp';
+    displayName = conv?.group_name || conv?.contact_name || phone;
   } else {
-    const phone = jid.split('@')[0];
     displayName = conv?.contact_name && conv.contact_name !== phone
       ? conv.contact_name
       : (conv?.wa_push_name || conv?.contact_phone || phone);
-    subLine = `+${phone}`;
   }
 
   // Header
-  document.getElementById('ch-avatar').textContent = isGroup ? '👥' : (displayName[0]?.toUpperCase() || '?');
+  const avatarEl = document.getElementById('ch-avatar');
+  if (isGroup) {
+    avatarEl.textContent = '👥';
+    avatarEl.style.fontSize = '20px';
+  } else {
+    avatarEl.textContent = displayName[0]?.toUpperCase() || '?';
+    avatarEl.style.fontSize = '';
+  }
   document.getElementById('ch-name').textContent = displayName;
-  document.getElementById('ch-phone').textContent = isGroup ? subLine : subLine;
-  document.getElementById('ch-company').textContent = (!isGroup && conv?.company) ? `· ${conv.company}` : '';
+  document.getElementById('ch-phone').textContent = isGroup ? `${jid}` : `+${phone}`;
+  document.getElementById('ch-company').textContent = isGroup ? '👥 Grupo de WhatsApp' : (conv?.company ? `· ${conv.company}` : '');
 
   // Status y asignación
   document.getElementById('conv-status-sel').value = conv?.status || 'open';
@@ -522,14 +518,10 @@ async function openChat(jid) {
 
   // Cargar mensajes
   const msgs = await apiFetch(`/conversations/${encodeURIComponent(jid)}/messages`) || [];
-  renderMessages(msgs, isGroup);
+  renderMessages(msgs);
 
   // Marcar como leído
   await apiFetch(`/conversations/${encodeURIComponent(jid)}/read`, { method: 'POST' });
-
-  // Resetear unread en estado local
-  const idx = S.conversations.findIndex(c => c.jid === jid);
-  if (idx !== -1) S.conversations[idx].unread_count = 0;
 
   // Avisar a otros que estoy viendo este chat
   socket.emit('chat:open', { jid });
@@ -584,12 +576,15 @@ function renderViewingIndicator(jid) {
   ).join('');
 }
 
-function renderMessages(msgs, isGroup = false) {
+function renderMessages(msgs) {
   const el = document.getElementById('messages-area');
   if (!msgs || !msgs.length) {
     el.innerHTML = '<div class="msg-date-sep" style="opacity:0.5">Sin mensajes aún en el CRM — los nuevos mensajes aparecerán aquí</div>';
     return;
   }
+
+  const activeConv = S.conversations.find(c => c.jid === S.activeJid);
+  const isGroupChat = S.activeJid?.endsWith('@g.us') || activeConv?.is_group == 1;
 
   let lastDate = '';
   el.innerHTML = msgs.map(m => {
@@ -605,8 +600,8 @@ function renderMessages(msgs, isGroup = false) {
       : '';
     const autoTag = m.is_auto_reply ? '<span class="msg-auto-tag">bot</span>' : '';
     const content = m.content || '[archivo]';
-    // En grupos mostrar nombre del sender para mensajes entrantes
-    const senderTag = isGroup && m.direction === 'in' && m.sender_name
+    // En grupos, mostrar quién habló encima del mensaje (solo para mensajes entrantes)
+    const senderTag = isGroupChat && m.direction === 'in' && m.sender_name
       ? `<div class="msg-sender-name">${esc(m.sender_name)}</div>`
       : '';
     return `${sep}
@@ -630,22 +625,25 @@ function appendMessage(msg) {
   const wrap = document.createElement('div');
   wrap.className = `msg-wrap ${msg.direction}`;
 
+  const activeConv = S.conversations.find(c => c.jid === S.activeJid);
+  const isGroupChat = S.activeJid?.endsWith('@g.us') || activeConv?.is_group == 1;
+
   let agentTag = '';
-  if (msg.direction === 'out' && msg.sent_by_name) {
-    agentTag = `<span class="msg-agent" style="background:${msg.sent_by_color || '#6366f1'}">${msg.sent_by_name[0]}</span>`;
-  } else if (msg.direction === 'out' && S.me && !msg.sent_by) {
-    // Mensaje optimistic del agente actual
+  if (msg.direction === 'out' && S.me) {
     agentTag = `<span class="msg-agent" style="background:${S.me.color}">${S.me.display_name[0]}</span>`;
   }
+  if (msg.sent_by_name && msg.sent_by !== S.me?.id) {
+    agentTag = `<span class="msg-agent" style="background:${msg.sent_by_color || '#6366f1'}">${msg.sent_by_name[0]}</span>`;
+  }
 
-  // Nombre del sender en grupos para mensajes entrantes
-  const senderTag = msg.is_group && msg.direction === 'in' && msg.sender_name
+  // Sender en grupos
+  const senderTag = isGroupChat && msg.direction === 'in' && msg.sender_name
     ? `<div class="msg-sender-name">${esc(msg.sender_name)}</div>`
     : '';
 
   wrap.innerHTML = `
     ${senderTag}
-    <div class="msg-bubble">${esc(msg.content)}</div>
+    <div class="msg-bubble">${esc(msg.content || '')}</div>
     <div class="msg-meta">
       <span class="msg-time">${d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}</span>
       ${agentTag}
@@ -1061,10 +1059,10 @@ async function sendMsg() {
   // Parar typing indicator
   socket.emit('typing:stop', { jid: S.activeJid });
 
-  const phone = S.activeJid.split('@')[0];
+  // Pasar el JID completo para que el backend sepa si es @lid, @s.whatsapp.net o @g.us
   const res = await apiFetch('/send', {
     method: 'POST',
-    body: JSON.stringify({ phone, message: text }),
+    body: JSON.stringify({ jid: S.activeJid, message: text }),
   });
 
   if (res?.error) notify(res.error, 'error');

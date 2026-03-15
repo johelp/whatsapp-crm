@@ -236,8 +236,12 @@ router.get('/conversations', requireAuth, async (req, res) => {
 
   let sql = `
     SELECT cv.*,
-      ${displayName} as contact_name,
-      COALESCE(c.phone, ${phoneFromJid}) as contact_phone,
+      CASE WHEN cv.is_group = 1 THEN COALESCE(cv.group_name, ${phoneFromJid})
+           ELSE ${displayName}
+      END as contact_name,
+      CASE WHEN cv.is_group = 1 THEN NULL
+           ELSE COALESCE(c.phone, ${phoneFromJid})
+      END as contact_phone,
       c.name as contact_saved_name,
       c.company as company,
       u.display_name as assigned_name, u.color as assigned_color
@@ -251,11 +255,11 @@ router.get('/conversations', requireAuth, async (req, res) => {
   if (assigned === 'me') { sql += ' AND cv.assigned_to = ?'; params.push(req.session.user.id); }
   if (search) {
     if (USE_PG) {
-      sql += ` AND (c.name ILIKE ? OR c.phone LIKE ? OR cv.wa_push_name ILIKE ? OR cv.last_message ILIKE ? OR ${phoneFromJid} LIKE ?)`;
+      sql += ` AND (c.name ILIKE ? OR c.phone LIKE ? OR cv.wa_push_name ILIKE ? OR cv.last_message ILIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name ILIKE ?)`;
     } else {
-      sql += ` AND (c.name LIKE ? OR c.phone LIKE ? OR cv.wa_push_name LIKE ? OR cv.last_message LIKE ? OR ${phoneFromJid} LIKE ?)`;
+      sql += ` AND (c.name LIKE ? OR c.phone LIKE ? OR cv.wa_push_name LIKE ? OR cv.last_message LIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name LIKE ?)`;
     }
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
   sql += ' ORDER BY cv.last_message_at DESC LIMIT 200';
 
@@ -281,17 +285,23 @@ router.get('/conversations', requireAuth, async (req, res) => {
 });
 
 router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {
-  // NOTA: evitar ::bigint que es sintaxis solo PostgreSQL — el cast lo hacemos en JS
-  const msgs = await query(`
+  const jidParam = decodeURIComponent(req.params.jid);
+  const msgs = await query(USE_PG ? `
     SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
-           m.timestamp,
-           m.is_read, m.is_auto_reply, m.sent_by, m.created_at,
-           m.sender_jid, m.sender_name,
+           m.timestamp::bigint as timestamp,
+           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name, m.created_at,
            u.display_name as sent_by_name, u.color as sent_by_color
     FROM messages m LEFT JOIN users u ON m.sent_by = u.id
     WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
-  `, [decodeURIComponent(req.params.jid)]);
-  // Asegurar que timestamp es siempre número (puede llegar como string de PG BIGINT)
+  ` : `
+    SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
+           m.timestamp,
+           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name, m.created_at,
+           u.display_name as sent_by_name, u.color as sent_by_color
+    FROM messages m LEFT JOIN users u ON m.sent_by = u.id
+    WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
+  `, [jidParam]);
+  // Asegurar que timestamp es siempre número
   res.json(msgs.map(m => ({ ...m, timestamp: Number(m.timestamp) || 0 })));
 });
 
@@ -351,16 +361,24 @@ router.delete('/conversations/:jid', requireAuth, async (req, res) => {
 
 router.post('/send', requireAuth, async (req, res) => {
   const { phone, message, jid } = req.body;
-  const target = phone || (jid ? jid.split('@')[0] : null);
-  if (!target || !message) return res.status(400).json({ error: 'phone/jid y message requeridos' });
+  if (!message) return res.status(400).json({ error: 'message requerido' });
   try {
-    // Detectar grupos por JID completo
+    // Grupos
     if (jid && jid.endsWith('@g.us')) {
       await sendGroupMessage(jid, message, req.session.user.id);
-    } else {
-      const cleanPhone = normalizePhone(target);
-      await sendMessage(cleanPhone, message, req.session.user.id);
+      return res.json({ ok: true });
     }
+    // JID completo (@lid o @s.whatsapp.net) — pasar directamente a sendMessage
+    // sendMessage ahora acepta JID completo o número suelto
+    if (jid && jid.includes('@')) {
+      await sendMessage(jid, message, req.session.user.id);
+      return res.json({ ok: true });
+    }
+    // Solo número: normalizar
+    const target = phone || (jid ? jid.split('@')[0] : null);
+    if (!target) return res.status(400).json({ error: 'phone o jid requerido' });
+    const cleanPhone = normalizePhone(target);
+    await sendMessage(cleanPhone, message, req.session.user.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -926,12 +944,6 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `UPDATE users SET is_active = 1 WHERE is_active IS NULL`,
     // Asegurar que conversations tiene columnas de timestamps
     `UPDATE conversations SET last_message_at = NOW() WHERE last_message_at IS NULL AND last_message IS NOT NULL`,
-    // ── v2: Grupos WhatsApp ──
-    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
-    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
-    // ── v2: Sender por mensaje (grupos) ──
-    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
-    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
     // Limpiar nombres de contactos que son iguales al teléfono (fallback anterior incorrecto)
     // Los setea a NULL para que la UI muestre el push_name de WA
     `UPDATE contacts SET name = NULL WHERE name = phone AND phone IS NOT NULL`,
@@ -940,14 +952,31 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
       SELECT c.name FROM contacts c WHERE c.id = conversations.contact_id AND c.name IS NOT NULL
     ) WHERE wa_push_name IS NULL AND contact_id IS NOT NULL`,
     // Eliminar conversaciones "fantasma" creadas por JIDs raros de onWhatsApp()
-    // Son conversaciones sin mensajes propios y sin last_message real, con JIDs numéricos raros
-    // (ej: 889058291715 — 12 dígitos, no corresponde a ningún código de país válido)
     `DELETE FROM conversations WHERE
       id NOT IN (SELECT DISTINCT conversation_id FROM conversation_labels WHERE conversation_id IS NOT NULL)
       AND last_message IS NULL
       AND unread_count = 0
       AND contact_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.jid = conversations.jid)`,
+    // Nuevas columnas — grupos y sender
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+    // Limpiar contactos creados con @lid como teléfono (números raros como 258978055516407)
+    // Son contactos cuyo phone no empieza con código de país válido (< 7 dígitos o > 15 dígitos)
+    // y cuya conversación asociada usa @lid — se elimina el contacto ficticio, no la conversación
+    `UPDATE conversations SET contact_id = NULL
+     WHERE contact_id IN (
+       SELECT id FROM contacts
+       WHERE length(phone) > 13 AND phone NOT SIMILAR TO '54[0-9]+|34[0-9]+|39[0-9]+|55[0-9]+|1[0-9]+'
+     )`,
+    `DELETE FROM contacts
+     WHERE length(phone) > 13
+       AND phone NOT SIMILAR TO '54[0-9]+|34[0-9]+|39[0-9]+|55[0-9]+|1[0-9]+'
+       AND id NOT IN (SELECT DISTINCT contact_id FROM conversations WHERE contact_id IS NOT NULL)`,
   ];
 
   for (const sql of ops) {
