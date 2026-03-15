@@ -281,14 +281,16 @@ async function callProvider(config, messages, systemPrompt) {
 
 async function _processForJid(jid, text, config, sendMessageFn) {
   const t0       = Date.now();
-  const jidShort = jid.split('@')[0];
+  const jidShort = jid.split('@')[0]; // solo para logs/métricas
 
   try {
     // Handoff
     if (detectsHandoff(text)) {
       console.log(`[AI v2] Handoff en ${jidShort}`);
       await query(`UPDATE conversations SET ai_disabled = 1 WHERE jid = ?`, [jid]).catch(() => {});
-      await sendMessageFn(jidShort, 'Entendido, te comunico con un agente. En breve te atienden.', null);
+      // CRÍTICO: pasar el JID COMPLETO (con @lid, @s.whatsapp.net, etc.)
+      // NO jidShort — si el contacto usa @lid, enviar al número causa "Esperando mensaje"
+      await sendMessageFn(jid, 'Entendido, te comunico con un agente. En breve te atienden.', null);
       return true;
     }
 
@@ -310,7 +312,8 @@ async function _processForJid(jid, text, config, sendMessageFn) {
       return false;
     }
 
-    await sendMessageFn(jidShort, responseText, null);
+    // CRÍTICO: pasar JID completo, no solo el número
+    await sendMessageFn(jid, responseText, null);
 
     // Métricas
     const elapsed = Date.now() - t0;

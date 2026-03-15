@@ -724,23 +724,36 @@ async function connect() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
-    // type='notify' → mensaje nuevo en tiempo real (entrante o saliente desde otro dispositivo)
-    // type='append' → historial cargado (solo guardamos, no notificamos)
+    // type='notify'  → mensaje nuevo en tiempo real (entrante O enviado en este dispositivo)
+    // type='append'  → puede ser:
+    //   a) historial viejo al sincronizar (timestamp antiguo)
+    //   b) mensaje enviado desde WA Web u otra sesión (timestamp reciente, fromMe=true)
     if (type !== 'notify' && type !== 'append') return;
+
+    const RECENT_MS = 5 * 60 * 1000; // 5 minutos = "mensaje reciente"
+    const now = Date.now();
 
     for (const msg of msgs) {
       if (msg.key?.fromMe) {
-        // Mensaje enviado por el número conectado desde el móvil u otra sesión WA
-        // Solo procesamos en tiempo real (notify), no al cargar historial (append ya lo maneja messaging-history.set)
-        if (type === 'notify') {
+        const ts = (msg.messageTimestamp || 0) * 1000;
+        const isRecent = (now - ts) < RECENT_MS;
+
+        // Procesar si:
+        // a) type='notify' → siempre (enviado ahora desde otra sesión)
+        // b) type='append' + timestamp reciente → enviado desde WA Web/móvil
+        // NO procesar si type='append' + timestamp viejo → historial, ya lo maneja messaging-history.set
+        if (type === 'notify' || (type === 'append' && isRecent)) {
           await processOutgoingMessage(msg).catch(e =>
             console.error('Error procesando msg saliente:', e.message)
           );
         }
       } else {
-        await processMessage(msg).catch(e =>
-          console.error('Error procesando mensaje:', e.message)
-        );
+        // Mensajes entrantes: solo notify (append/historial lo maneja messaging-history.set)
+        if (type === 'notify') {
+          await processMessage(msg).catch(e =>
+            console.error('Error procesando mensaje:', e.message)
+          );
+        }
       }
     }
   });
@@ -765,11 +778,14 @@ async function sendMessage(phone, text, sentBy = null) {
     convJid = normalizeJid(phone);
   }
 
-  await sock.presenceSubscribe(convJid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', convJid);
-  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
-  await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', convJid);
+  // Typing indicator — solo si es @s.whatsapp.net (no @lid ni grupos)
+  // presenceSubscribe en @lid o cuentas Business causa "Esperando mensaje"
+  if (convJid.endsWith('@s.whatsapp.net')) {
+    await sock.sendPresenceUpdate('composing', convJid).catch(() => {});
+    const typingMs = Math.min(Math.max(text.length * 25, 600), 2500);
+    await new Promise(r => setTimeout(r, typingMs));
+    await sock.sendPresenceUpdate('paused', convJid).catch(() => {});
+  }
 
   const sent = await sock.sendMessage(convJid, { text });
 
@@ -955,9 +971,9 @@ async function sendGroupMessage(groupJid, text, sentBy = null) {
   }
   if (!groupJid.endsWith('@g.us')) throw new Error('JID de grupo inválido');
 
-  // Indicador de escritura en el grupo
+  // Typing indicator en grupos (siempre @g.us, no causa problemas)
   await sock.sendPresenceUpdate('composing', groupJid).catch(() => {});
-  const typingMs = Math.min(Math.max(text.length * 20, 600), 2500);
+  const typingMs = Math.min(Math.max(text.length * 20, 400), 2000);
   await new Promise(r => setTimeout(r, typingMs));
   await sock.sendPresenceUpdate('paused', groupJid).catch(() => {});
 
