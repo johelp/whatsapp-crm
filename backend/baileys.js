@@ -99,14 +99,37 @@ function getMessageText(msg) {
 
 function isBusinessHours(config) {
   if (!config?.is_active) return true;
+
+  // Usar la zona horaria configurada (default: Europe/Madrid para SnowMotion Sierra Nevada)
+  // Railway corre en UTC — sin esto el horario se evalúa mal
+  const tz = config.timezone || 'Europe/Madrid';
   const now = new Date();
-  const day = now.getDay();
+
+  // Obtener hora/día locales en la zona correcta
+  const localStr = now.toLocaleString('en-US', { timeZone: tz, hour12: false,
+    weekday: 'long', hour: 'numeric', minute: 'numeric' });
+  // Parsear día y hora del string local
+  const dayMap = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
+  const parts = now.toLocaleString('en-US', { timeZone: tz, hour12: false }).split(', ');
+  const timePart = parts[1] || '00:00:00';
+  const [hStr, mStr] = timePart.split(':');
+  const localH = parseInt(hStr, 10) % 24;
+  const localM = parseInt(mStr, 10);
+  const localNowMin = localH * 60 + localM;
+
+  // Día de la semana local (0=Dom ... 6=Sáb)
+  const localDay = new Date(now.toLocaleString('en-US', { timeZone: tz })).getDay();
+
   const workDays = (config.working_days || '1,2,3,4,5').split(',').map(Number);
-  if (!workDays.includes(day)) return false;
-  const [sh, sm] = config.schedule_start.split(':').map(Number);
-  const [eh, em] = config.schedule_end.split(':').map(Number);
-  const nowMin = now.getHours() * 60 + now.getMinutes();
-  return nowMin >= sh * 60 + sm && nowMin <= eh * 60 + em;
+  if (!workDays.includes(localDay)) return false; // día no hábil → NO es horario laboral
+
+  // Null safety en schedule_start/end
+  const startStr = config.schedule_start || '09:00';
+  const endStr   = config.schedule_end   || '18:00';
+  const [sh, sm] = startStr.split(':').map(Number);
+  const [eh, em] = endStr.split(':').map(Number);
+
+  return localNowMin >= sh * 60 + sm && localNowMin <= eh * 60 + em;
 }
 
 const fieldPrompts = {
@@ -159,15 +182,31 @@ async function runAutoReplyBot(jid, incomingText, conv) {
   }
 
   if (responseText && sock) {
-    await sock.sendMessage(jid, { text: responseText });
-    await saveMessage({
-      message_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-      jid, direction: 'out', type: 'text',
-      content: responseText, timestamp: Date.now(),
-      is_auto_reply: 1, sent_by: null,
-    });
+    // Usar sendMessage() y NO sock.sendMessage() directo
+    // para que pase por el manejo correcto de JID (@lid, @s.whatsapp.net)
+    // sendMessage ya guarda el mensaje en DB — pasamos el JID completo
+    try {
+      await sendMessage(jid, responseText, null);
+    } catch(e) {
+      // Fallback: si sendMessage falla, intentar directo con sock
+      console.error('[AutoReply] sendMessage falló, fallback directo:', e.message);
+      await sock.sendMessage(jid, { text: responseText });
+      await saveMessage({
+        message_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+        jid, direction: 'out', type: 'text',
+        content: responseText, timestamp: Date.now(),
+        is_auto_reply: 1, sent_by: null,
+      });
+    }
+    // Marcar como auto-reply (sendMessage guarda is_auto_reply=0, corregir)
     await query(
-      'UPDATE conversations SET bot_state = ?, bot_collected = ?, updated_at = datetime(\'now\') WHERE jid = ?',
+      `UPDATE messages SET is_auto_reply = 1
+       WHERE jid = ? AND direction = 'out' AND is_auto_reply = 0
+       ORDER BY timestamp DESC LIMIT 1`,
+      [jid]
+    ).catch(() => {});
+    await query(
+      'UPDATE conversations SET bot_state = ?, bot_collected = ?, updated_at = NOW() WHERE jid = ?',
       [newState, JSON.stringify(newCollected), jid]
     );
   }

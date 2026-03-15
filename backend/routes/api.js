@@ -563,17 +563,18 @@ router.get('/auto-reply', requireAuth, async (req, res) => {
 });
 
 router.put('/auto-reply', requireAuth, async (req, res) => {
-  const { is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields } = req.body;
+  const { is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields, timezone } = req.body;
   const existing = await queryOne('SELECT id FROM auto_reply_config LIMIT 1');
+  const fields = JSON.stringify(Array.isArray(collect_fields) ? collect_fields : [collect_fields].filter(Boolean));
   if (existing) {
     await query(
-      'UPDATE auto_reply_config SET is_active=?, schedule_start=?, schedule_end=?, working_days=?, greeting_message=?, collect_fields=?, updated_at=datetime(\'now\') WHERE id=1',
-      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, JSON.stringify(collect_fields)]
+      'UPDATE auto_reply_config SET is_active=?, schedule_start=?, schedule_end=?, working_days=?, greeting_message=?, collect_fields=?, timezone=COALESCE(?,timezone), updated_at=NOW() WHERE id=1',
+      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, fields, timezone || null]
     );
   } else {
     await query(
-      'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields) VALUES (?,?,?,?,?,?)',
-      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, JSON.stringify(collect_fields)]
+      'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields, timezone) VALUES (?,?,?,?,?,?,?)',
+      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, fields, timezone || 'Europe/Madrid']
     );
   }
   res.json({ ok: true });
@@ -965,6 +966,7 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+    `ALTER TABLE auto_reply_config ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Madrid'`,
     // Limpiar contactos creados con @lid como teléfono (números raros como 258978055516407)
     // Son contactos cuyo phone no empieza con código de país válido (< 7 dígitos o > 15 dígitos)
     // y cuya conversación asociada usa @lid — se elimina el contacto ficticio, no la conversación

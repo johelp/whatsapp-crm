@@ -1740,6 +1740,21 @@ async function renderSettings() {
         </div>
         <div class="field"><label>Hora inicio</label><input class="input" type="time" id="ar-start" value="${autoReply.schedule_start || '09:00'}"></div>
         <div class="field"><label>Hora fin</label><input class="input" type="time" id="ar-end" value="${autoReply.schedule_end || '18:00'}"></div>
+        <div class="field"><label>Zona horaria</label>
+          <select class="input" id="ar-timezone">
+            ${[
+              ['Europe/Madrid','España (Madrid)'],
+              ['America/Argentina/Buenos_Aires','Argentina (Buenos Aires)'],
+              ['America/Mexico_City','México (CDMX)'],
+              ['America/Bogota','Colombia (Bogotá)'],
+              ['America/Santiago','Chile (Santiago)'],
+              ['America/Lima','Perú (Lima)'],
+              ['America/New_York','USA Eastern'],
+              ['America/Los_Angeles','USA Pacific'],
+              ['UTC','UTC'],
+            ].map(([v,l]) => `<option value="${v}" ${(autoReply.timezone || 'Europe/Madrid') === v ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+        </div>
         <div class="field"><label>Días hábiles</label><input class="input" id="ar-days" value="${autoReply.working_days || '1,2,3,4,5'}" placeholder="1=Lun...7=Dom"></div>
       </div>
       <div class="field" style="margin-bottom:12px">
@@ -1976,6 +1991,7 @@ async function saveAutoReply() {
       is_active: document.getElementById('ar-toggle').classList.contains('on'),
       schedule_start: document.getElementById('ar-start').value,
       schedule_end: document.getElementById('ar-end').value,
+      timezone: document.getElementById('ar-timezone').value,
       working_days: document.getElementById('ar-days').value,
       greeting_message: document.getElementById('ar-msg').value,
       collect_fields: fields,

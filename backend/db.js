@@ -405,6 +405,8 @@ async function runMigrations() {
     // Sender en mensajes de grupo
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+    // Timezone para auto-reply
+    `ALTER TABLE auto_reply_config ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Madrid'`,
   ];
   for (const sql of migrations) {
     try { await query(sql); } catch(e) { console.log('Migration skip:', e.message.substring(0,60)); }
