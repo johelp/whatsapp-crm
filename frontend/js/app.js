@@ -146,17 +146,24 @@ socket.on('message:sent', (data) => {
     S.conversations.unshift(conv);
     renderConversationList();
   }
-  // Si el chat está abierto y el mensaje lo envió OTRO agente (no yo), mostrarlo
-  if (S.activeJid === data.jid && data.sent_by !== S.me?.id) {
-    appendMessage({
-      direction: 'out',
-      content: data.content,
-      timestamp: data.timestamp,
-      sent_by: data.sent_by,
-      sent_by_name: data.sent_by_name,
-      sent_by_color: data.sent_by_color,
-      type: data.type || 'text',
-    });
+  // Mostrar en el chat si:
+  // a) lo envió otro agente del CRM (sent_by !== mi ID)
+  // b) lo envió desde el móvil (from_device = true, sent_by = null)
+  if (S.activeJid === data.jid) {
+    const isFromOtherAgent = data.sent_by && data.sent_by !== S.me?.id;
+    const isFromMobile = data.from_device === true;
+    if (isFromOtherAgent || isFromMobile) {
+      appendMessage({
+        direction: 'out',
+        content: data.content,
+        timestamp: data.timestamp,
+        sent_by: data.sent_by,
+        sent_by_name: data.sent_by_name,
+        sent_by_color: data.sent_by_color,
+        from_device: data.from_device,
+        type: data.type || 'text',
+      });
+    }
   }
 });
 
@@ -595,9 +602,15 @@ function renderMessages(msgs) {
     const timeStr = d ? d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : '--:--';
     const sep = dateStr !== lastDate ? `<div class="msg-date-sep">${dateStr}</div>` : '';
     lastDate = dateStr;
-    const agentTag = m.sent_by && m.sent_by_name
-      ? `<span class="msg-agent" style="background:${m.sent_by_color || '#6366f1'}">${m.sent_by_name[0]}</span>`
-      : '';
+    // sent_by=null y sent_by_name='📱 Móvil' → enviado desde el teléfono
+    const fromDevice = m.direction === 'out' && !m.sent_by && !m.sent_by_name;
+    // También soportar cuando viene del socket con sent_by_name='📱 Móvil'
+    const isFromMobile = fromDevice || (m.direction === 'out' && m.from_device);
+    const agentTag = isFromMobile
+      ? `<span class="msg-agent msg-agent-mobile" title="Enviado desde el móvil">📱</span>`
+      : (m.sent_by && m.sent_by_name
+          ? `<span class="msg-agent" style="background:${m.sent_by_color || '#6366f1'}">${m.sent_by_name[0]}</span>`
+          : '');
     const autoTag = m.is_auto_reply ? '<span class="msg-auto-tag">bot</span>' : '';
     const content = m.content || '[archivo]';
     // En grupos, mostrar quién habló encima del mensaje (solo para mensajes entrantes)
@@ -605,7 +618,7 @@ function renderMessages(msgs) {
       ? `<div class="msg-sender-name">${esc(m.sender_name)}</div>`
       : '';
     return `${sep}
-    <div class="msg-wrap ${m.direction} ${m.is_auto_reply ? 'auto' : ''}">
+    <div class="msg-wrap ${m.direction} ${m.is_auto_reply ? 'auto' : ''} ${isFromMobile ? 'from-device' : ''}">
       ${senderTag}
       <div class="msg-bubble">${esc(content)}</div>
       <div class="msg-meta">
@@ -629,10 +642,12 @@ function appendMessage(msg) {
   const isGroupChat = S.activeJid?.endsWith('@g.us') || activeConv?.is_group == 1;
 
   let agentTag = '';
-  if (msg.direction === 'out' && S.me) {
+  const isFromMobile = msg.from_device || (msg.direction === 'out' && !msg.sent_by && !msg.sent_by_name);
+  if (isFromMobile) {
+    agentTag = `<span class="msg-agent msg-agent-mobile" title="Enviado desde el móvil">📱</span>`;
+  } else if (msg.direction === 'out' && S.me && !msg.sent_by_name) {
     agentTag = `<span class="msg-agent" style="background:${S.me.color}">${S.me.display_name[0]}</span>`;
-  }
-  if (msg.sent_by_name && msg.sent_by !== S.me?.id) {
+  } else if (msg.sent_by_name) {
     agentTag = `<span class="msg-agent" style="background:${msg.sent_by_color || '#6366f1'}">${msg.sent_by_name[0]}</span>`;
   }
 
@@ -1204,6 +1219,7 @@ function renderCampaignsGrid() {
         ${canStart ? `<button class="btn-primary btn-sm" onclick="startCampaign(${c.id})">▶ Iniciar</button>` : ''}
         ${isActive ? `<button class="btn-danger btn-sm" onclick="cancelActiveCampaign()">⛔ Cancelar</button>` : ''}
         <button class="btn-secondary btn-sm" onclick="editCampaign(${c.id})">✏️ Editar</button>
+        <button class="btn-secondary btn-sm" onclick="duplicateCampaign(${c.id})" title="Duplicar campaña">⧉</button>
       </div>
     </div>`;
   }).join('');
@@ -1397,6 +1413,20 @@ async function deleteCampaign() {
     notify(`✅ Campaña eliminada`);
   } else {
     notify(res?.error || 'Error', 'error');
+  }
+}
+
+async function duplicateCampaign(id) {
+  const c = S.campaigns.find(x => x.id === id);
+  if (!confirm(`¿Duplicar campaña "${c?.name}"?`)) return;
+  const res = await apiFetch(`/campaigns/${id}/duplicate`, { method: 'POST' });
+  if (res?.ok) {
+    notify(`✅ Campaña duplicada como "${c?.name} (copia)"`);
+    await loadCampaigns();
+    // Abrir la copia para editarla
+    if (res.id) editCampaign(res.id);
+  } else {
+    notify(res?.error || 'Error duplicando', 'error');
   }
 }
 
@@ -2560,13 +2590,15 @@ async function systemResyncHistory() {
   const pwd = document.getElementById('sys-pwd-seed')?.value;
   if (!pwd) { notify('Ingresá tu contraseña', 'error'); return; }
   const el = document.getElementById('seed-result');
-  el.innerHTML = '<span style="color:var(--text3)">Solicitando re-sincronización...</span>';
+  el.innerHTML = '<span style="color:var(--text3)">⏳ Solicitando re-sincronización a WhatsApp...</span>';
 
   const res = await apiFetch('/system/resync-history', { method: 'POST', body: JSON.stringify({ password: pwd }) });
   if (res?.ok) {
-    el.innerHTML = `<span style="color:var(--wa)">✅ ${res.message}</span>`;
-    notify('✅ Re-sync iniciado, esperá unos minutos');
+    el.innerHTML = `<span style="color:var(--wa)">✅ ${res.message || 'Re-sync solicitado — los mensajes aparecerán en los próximos minutos'}</span>`;
+    notify('✅ Re-sync iniciado');
     document.getElementById('sys-pwd-seed').value = '';
+    // Mostrar banner de sincronización para que el usuario sepa que está en proceso
+    showSyncBanner();
   } else {
     el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
     notify(res?.error || 'Error', 'error');

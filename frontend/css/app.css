@@ -701,6 +701,17 @@ html, body {
   opacity: 0.85;
 }
 
+/* Mensajes enviados desde el móvil / otra sesión WA */
+.msg-agent-mobile {
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.7;
+}
+.msg-wrap.from-device .msg-bubble {
+  opacity: 0.88;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+
 .remote-typing {
   padding: 6px 16px;
   font-size: 11px;
