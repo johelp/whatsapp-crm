@@ -1,6 +1,6 @@
 /**
- * baileys.js — Conexion WhatsApp con Baileys
- * Usa dynamic import() para compatibilidad con Node 18/20/22 (ESM)
+ * baileys.js — Conexion WhatsApp con Baileys ESM
+ * VERSIÓN SIMPLIFICADA Y ROBUSTA — sin lógica de país específica
  */
 const pino = require('pino');
 const path = require('path');
@@ -9,7 +9,6 @@ const qrcode = require('qrcode');
 const { query, queryOne } = require('./db');
 const { runAIAgent } = require('./ai-agent');
 
-// Baileys se importa dinámicamente en connect() por ser ESM puro
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType;
 
 const AUTH_PATH = process.env.WA_AUTH_PATH
@@ -28,22 +27,11 @@ function setIO(socketIO) { io = socketIO; }
 function getStatus() { return { status: connectionStatus, qr: qrData }; }
 function getSock() { return sock; }
 
-// ─── Normalización de números ─────────────────────────────────────────────────
-// WhatsApp Argentina: algunos números llegan con 549... otros con 54...
-// Normalizamos siempre a 549XXXXXXXXXX para celulares argentinos
+// ─── Normalización ────────────────────────────────────────────────────────────
 
 function normalizePhone(raw) {
-  let p = String(raw).replace(/\D/g, '');
-
-  // Quitar prefijo de JID si viene con @
-  p = p.split('@')[0];
-
-  // Sin normalización de país específica — el sistema opera globalmente
-  // WhatsApp ya maneja los números en formato E.164 internacionalmente
-  // La normalización Argentina (+9) causaba que números de España, México, etc.
-  // no encontraran sus conversaciones existentes
-
-  return p;
+  // Solo limpiar — sin transformaciones de país
+  return String(raw).replace(/\D/g, '').split('@')[0];
 }
 
 function normalizeJid(phone) {
@@ -51,30 +39,23 @@ function normalizeJid(phone) {
 }
 
 function extractPhone(jid) {
-  return jid.split('@')[0];
+  return String(jid).split('@')[0];
 }
 
-// Busca contacto por número — tolerante a variantes internacionales
+// Busca contacto por número exacto o variante (últimos 10 dígitos)
 async function findContactByPhone(phone) {
-  const clean = phone.replace(/\D/g, '');
-  
-  // 1. Exacto
+  const clean = normalizePhone(phone);
   let c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [clean]);
   if (c) return c;
-
-  // 2. Por los últimos 10 dígitos (suficiente para identificar un número único)
-  //    Cubre variantes con/sin código de país, con/sin 9 argentino, etc.
-  if (clean.length >= 8) {
+  // Buscar por sufijo de 10 dígitos
+  if (clean.length >= 10) {
     const suffix = clean.slice(-10);
-    c = await queryOne(
-      `SELECT * FROM contacts WHERE phone LIKE ? ORDER BY updated_at DESC LIMIT 1`,
-      [`%${suffix}`]
-    );
-    if (c) return c;
+    c = await queryOne(`SELECT * FROM contacts WHERE phone LIKE ?`, [`%${suffix}`]);
   }
-
-  return null;
+  return c || null;
 }
+
+// ─── Texto del mensaje ────────────────────────────────────────────────────────
 
 function getMessageText(msg) {
   if (!msg.message) return { type: 'unknown', text: '', mediaData: null };
@@ -83,89 +64,47 @@ function getMessageText(msg) {
   let text = '';
   let mediaData = null;
 
+  const extractMedia = (obj, mediaType) => ({
+    type: mediaType,
+    mimetype: obj?.mimetype || null,
+    caption: obj?.caption || '',
+    fileName: obj?.fileName || null,
+    ptt: obj?.ptt || false,
+    seconds: obj?.seconds || 0,
+    url: obj?.url || null,
+    directPath: obj?.directPath || null,
+    mediaKey: obj?.mediaKey ? Buffer.from(obj.mediaKey).toString('base64') : null,
+    fileEncSha256: obj?.fileEncSha256 ? Buffer.from(obj.fileEncSha256).toString('base64') : null,
+    fileSha256: obj?.fileSha256 ? Buffer.from(obj.fileSha256).toString('base64') : null,
+    fileLength: obj?.fileLength || null,
+  });
+
   switch (type) {
-    case 'conversation':
-      text = m.conversation;
-      break;
-    case 'extendedTextMessage':
-      text = m.extendedTextMessage?.text || '';
-      break;
-    case 'imageMessage': {
-      const img = m.imageMessage;
-      text = img?.caption || '';
-      mediaData = {
-        type: 'image',
-        mimetype: img?.mimetype || 'image/jpeg',
-        caption: img?.caption || '',
-        url: img?.url || null,
-        directPath: img?.directPath || null,
-        mediaKey: img?.mediaKey ? Buffer.from(img.mediaKey).toString('base64') : null,
-        fileEncSha256: img?.fileEncSha256 ? Buffer.from(img.fileEncSha256).toString('base64') : null,
-        fileSha256: img?.fileSha256 ? Buffer.from(img.fileSha256).toString('base64') : null,
-        fileLength: img?.fileLength || null,
-      };
+    case 'conversation':       text = m.conversation || ''; break;
+    case 'extendedTextMessage': text = m.extendedTextMessage?.text || ''; break;
+    case 'imageMessage':
+      text = m.imageMessage?.caption || '';
+      mediaData = extractMedia(m.imageMessage, 'image');
       if (!text) text = '[Imagen]';
       break;
-    }
-    case 'videoMessage': {
-      const vid = m.videoMessage;
-      text = vid?.caption || '[Video]';
-      mediaData = {
-        type: 'video',
-        mimetype: vid?.mimetype || 'video/mp4',
-        caption: vid?.caption || '',
-        url: vid?.url || null,
-        directPath: vid?.directPath || null,
-        mediaKey: vid?.mediaKey ? Buffer.from(vid.mediaKey).toString('base64') : null,
-        fileEncSha256: vid?.fileEncSha256 ? Buffer.from(vid.fileEncSha256).toString('base64') : null,
-        fileSha256: vid?.fileSha256 ? Buffer.from(vid.fileSha256).toString('base64') : null,
-        fileLength: vid?.fileLength || null,
-      };
+    case 'videoMessage':
+      text = m.videoMessage?.caption || '[Video]';
+      mediaData = extractMedia(m.videoMessage, 'video');
       break;
-    }
-    case 'audioMessage': {
-      const aud = m.audioMessage;
+    case 'audioMessage':
       text = '[Audio]';
-      mediaData = {
-        type: 'audio',
-        mimetype: aud?.mimetype || 'audio/ogg; codecs=opus',
-        ptt: aud?.ptt || false,
-        seconds: aud?.seconds || 0,
-        url: aud?.url || null,
-        directPath: aud?.directPath || null,
-        mediaKey: aud?.mediaKey ? Buffer.from(aud.mediaKey).toString('base64') : null,
-        fileEncSha256: aud?.fileEncSha256 ? Buffer.from(aud.fileEncSha256).toString('base64') : null,
-        fileSha256: aud?.fileSha256 ? Buffer.from(aud.fileSha256).toString('base64') : null,
-        fileLength: aud?.fileLength || null,
-      };
+      mediaData = extractMedia(m.audioMessage, 'audio');
       break;
-    }
-    case 'documentMessage': {
-      const doc = m.documentMessage;
-      text = `[Archivo: ${doc?.fileName || ''}]`;
-      mediaData = {
-        type: 'document',
-        mimetype: doc?.mimetype || 'application/octet-stream',
-        fileName: doc?.fileName || 'archivo',
-        url: doc?.url || null,
-        directPath: doc?.directPath || null,
-        mediaKey: doc?.mediaKey ? Buffer.from(doc.mediaKey).toString('base64') : null,
-        fileEncSha256: doc?.fileEncSha256 ? Buffer.from(doc.fileEncSha256).toString('base64') : null,
-        fileSha256: doc?.fileSha256 ? Buffer.from(doc.fileSha256).toString('base64') : null,
-        fileLength: doc?.fileLength || null,
-      };
+    case 'documentMessage':
+      text = `[Archivo: ${m.documentMessage?.fileName || ''}]`;
+      mediaData = extractMedia(m.documentMessage, 'document');
       break;
-    }
-    case 'stickerMessage':
-      text = '[Sticker]';
+    case 'stickerMessage': text = '[Sticker]'; break;
+    case 'locationMessage':
+      text = `[Ubicación]`;
       break;
-    case 'locationMessage': {
-      const loc = m.locationMessage;
-      text = `[Ubicación: ${loc?.degreesLatitude},${loc?.degreesLongitude}]`;
-      break;
-    }
-    default:
-      text = `[${type || 'mensaje'}]`;
+    case 'reactionMessage': text = ''; break;
+    default: text = type ? `[${type}]` : '';
   }
   return { type: type || 'text', text, mediaData };
 }
@@ -174,36 +113,19 @@ function getMessageText(msg) {
 
 function isBusinessHours(config) {
   if (!config?.is_active) return true;
-
-  // Usar la zona horaria configurada (default: Europe/Madrid para SnowMotion Sierra Nevada)
-  // Railway corre en UTC — sin esto el horario se evalúa mal
   const tz = config.timezone || 'Europe/Madrid';
   const now = new Date();
-
-  // Obtener hora/día locales en la zona correcta
-  const localStr = now.toLocaleString('en-US', { timeZone: tz, hour12: false,
-    weekday: 'long', hour: 'numeric', minute: 'numeric' });
-  // Parsear día y hora del string local
-  const dayMap = { Sunday: 0, Monday: 1, Tuesday: 2, Wednesday: 3, Thursday: 4, Friday: 5, Saturday: 6 };
   const parts = now.toLocaleString('en-US', { timeZone: tz, hour12: false }).split(', ');
   const timePart = parts[1] || '00:00:00';
   const [hStr, mStr] = timePart.split(':');
   const localH = parseInt(hStr, 10) % 24;
   const localM = parseInt(mStr, 10);
   const localNowMin = localH * 60 + localM;
-
-  // Día de la semana local (0=Dom ... 6=Sáb)
   const localDay = new Date(now.toLocaleString('en-US', { timeZone: tz })).getDay();
-
   const workDays = (config.working_days || '1,2,3,4,5').split(',').map(Number);
-  if (!workDays.includes(localDay)) return false; // día no hábil → NO es horario laboral
-
-  // Null safety en schedule_start/end
-  const startStr = config.schedule_start || '09:00';
-  const endStr   = config.schedule_end   || '18:00';
-  const [sh, sm] = startStr.split(':').map(Number);
-  const [eh, em] = endStr.split(':').map(Number);
-
+  if (!workDays.includes(localDay)) return false;
+  const [sh, sm] = (config.schedule_start || '09:00').split(':').map(Number);
+  const [eh, em] = (config.schedule_end   || '18:00').split(':').map(Number);
   return localNowMin >= sh * 60 + sm && localNowMin <= eh * 60 + em;
 }
 
@@ -215,9 +137,7 @@ const fieldPrompts = {
 };
 
 async function runAutoReplyBot(jid, incomingText, conv) {
-  // Nunca responder en grupos
   if (jid.endsWith('@g.us')) return false;
-
   const config = await queryOne('SELECT * FROM auto_reply_config LIMIT 1');
   if (!config || !config.is_active) return false;
   if (isBusinessHours(config)) return false;
@@ -226,9 +146,7 @@ async function runAutoReplyBot(jid, incomingText, conv) {
   const collected = JSON.parse(conv?.bot_collected || '{}');
   const fields = JSON.parse(config.collect_fields || '["name","email","phone","reason"]');
 
-  let responseText = '';
-  let newState = botState;
-  let newCollected = { ...collected };
+  let responseText = '', newState = botState, newCollected = { ...collected };
 
   if (botState === 'idle') {
     responseText = config.greeting_message || 'Hola! Estamos fuera de horario.';
@@ -247,8 +165,7 @@ async function runAutoReplyBot(jid, incomingText, conv) {
       responseText = fieldPrompts[next] || `Y tu ${next}?`;
       newState = `collecting_${next}`;
     } else {
-      const summary = Object.entries(newCollected)
-        .map(([k, v]) => `- ${k}: ${v}`).join('\n');
+      const summary = Object.entries(newCollected).map(([k, v]) => `- ${k}: ${v}`).join('\n');
       responseText = `Gracias! Tomamos nota:\n\n${summary}\n\nTe respondemos en el proximo horario de atencion.`;
       newState = 'done';
       if (io) io.emit('bot:lead_collected', { jid, phone: extractPhone(jid), data: newCollected, time: new Date().toISOString() });
@@ -260,33 +177,18 @@ async function runAutoReplyBot(jid, incomingText, conv) {
   }
 
   if (responseText && sock) {
-    // Usar sendMessage() y NO sock.sendMessage() directo
-    // para que pase por el manejo correcto de JID (@lid, @s.whatsapp.net)
-    // sendMessage ya guarda el mensaje en DB — pasamos el JID completo
     try {
       await sendMessage(jid, responseText, null);
     } catch(e) {
-      // Fallback: si sendMessage falla, intentar directo con sock
-      console.error('[AutoReply] sendMessage falló, fallback directo:', e.message);
-      await sock.sendMessage(jid, { text: responseText });
-      await saveMessage({
-        message_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        jid, direction: 'out', type: 'text',
-        content: responseText, timestamp: Date.now(),
-        is_auto_reply: 1, sent_by: null,
-      });
+      console.error('[AutoReply] Error:', e.message);
+      try {
+        await sock.sendMessage(jid, { text: responseText });
+        await saveMessage({ message_id: `bot_${Date.now()}`, jid, direction: 'out', type: 'text', content: responseText, timestamp: Date.now(), is_auto_reply: 1, sent_by: null });
+      } catch(e2) { console.error('[AutoReply] Fallback falló:', e2.message); }
     }
-    // Marcar como auto-reply (sendMessage guarda is_auto_reply=0, corregir)
-    await query(
-      `UPDATE messages SET is_auto_reply = 1
-       WHERE jid = ? AND direction = 'out' AND is_auto_reply = 0
-       ORDER BY timestamp DESC LIMIT 1`,
-      [jid]
-    ).catch(() => {});
-    await query(
-      'UPDATE conversations SET bot_state = ?, bot_collected = ?, updated_at = NOW() WHERE jid = ?',
-      [newState, JSON.stringify(newCollected), jid]
-    );
+    await query('UPDATE conversations SET bot_state = ?, bot_collected = ?, updated_at = NOW() WHERE jid = ?',
+      [newState, JSON.stringify(newCollected), jid]).catch(() => {});
+    await query(`UPDATE messages SET is_auto_reply = 1 WHERE jid = ? AND direction = 'out' ORDER BY timestamp DESC LIMIT 1`, [jid]).catch(() => {});
   }
   return true;
 }
@@ -310,7 +212,6 @@ async function saveMessage({ message_id, jid, direction, type, content, timestam
 async function upsertConversationHistory(jid, contactId, lastMessage, lastMessageAt, direction) {
   const existing = await queryOne('SELECT id, last_message_at FROM conversations WHERE jid = ?', [jid]);
   if (existing) {
-    // Solo actualizar last_message si este mensaje es más reciente
     await query(
       `UPDATE conversations SET
         contact_id = COALESCE(contact_id, ?),
@@ -350,10 +251,8 @@ async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pu
   }
 }
 
-
 // ─── Grupos ───────────────────────────────────────────────────────────────────
 
-// Cache de metadata de grupos en memoria (jid → {subject, participants, ...})
 const _groupCache = new Map();
 
 async function getGroupMetadata(jid) {
@@ -363,49 +262,20 @@ async function getGroupMetadata(jid) {
     const meta = await sock.groupMetadata(jid);
     if (meta) _groupCache.set(jid, meta);
     return meta;
-  } catch(e) {
-    return null;
-  }
+  } catch(e) { return null; }
 }
 
-async function upsertGroup(jid, subject, description) {
-  // Upsert en tabla conversations con flag is_group y nombre del grupo
-  try {
-    await query(
-      `INSERT INTO conversations (jid, is_group, group_name, last_message_at)
-       VALUES (?, 1, ?, NOW())
-       ON CONFLICT (jid) DO UPDATE SET
-         is_group = 1,
-         group_name = COALESCE(EXCLUDED.group_name, conversations.group_name)`,
-      [jid, subject || jid.split('@')[0]]
-    );
-  } catch(e) {
-    // ignorar
-  }
-}
-
-// Procesar mensaje de grupo
 async function processGroupMessage(msg) {
   if (!msg.message || msg.key.fromMe) return;
-
-  const groupJid = msg.key.remoteJid; // formato: XXXXX@g.us
-  const senderJid = msg.key.participant || ''; // quien habló en el grupo
-  const senderPhone = senderJid ? normalizePhone(extractPhone(senderJid)) : null;
-
+  const groupJid = msg.key.remoteJid;
+  const senderJid = msg.key.participant || '';
   const { type, text, mediaData } = getMessageText(msg);
-  if (!text && !mediaData) return; // ignorar mensajes completamente vacíos
-
+  if (!text && !mediaData) return;
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
-  const pushName = msg.pushName || senderPhone || 'Desconocido';
-
-  // Obtener o crear metadata del grupo
+  const pushName = msg.pushName || extractPhone(senderJid) || 'Desconocido';
   let groupName = groupJid.split('@')[0];
-  try {
-    const meta = await getGroupMetadata(groupJid);
-    if (meta?.subject) groupName = meta.subject;
-  } catch(e) {}
-
-  // Asegurar que existe la conversación de grupo
+  try { const meta = await getGroupMetadata(groupJid); if (meta?.subject) groupName = meta.subject; } catch(e) {}
+  const content = text || (mediaData ? `[${mediaData.type}]` : '[mensaje]');
   try {
     await query(
       `INSERT INTO conversations (jid, is_group, group_name, last_message, last_message_at, unread_count)
@@ -417,315 +287,144 @@ async function processGroupMessage(msg) {
          last_message_at = NOW(),
          unread_count = conversations.unread_count + 1,
          updated_at = NOW()`,
-      [groupJid, groupName, text]
+      [groupJid, groupName, content]
     );
-  } catch(e) {
-    console.error('Error upsert grupo:', e.message);
-  }
-
-  // Guardar mensaje con info del sender
-  await saveMessage({
-    message_id: msg.key.id,
-    jid: groupJid,
-    direction: 'in',
-    type,
-    content: text || '',
-    timestamp,
-    is_auto_reply: 0,
-    sent_by: null,
-    sender_jid: senderJid,
-    sender_name: pushName,
-    media_data: mediaData,
-  });
-
-  if (io) {
-    io.emit('message:new', {
-      jid: groupJid,
-      is_group: true,
-      group_name: groupName,
-      sender_jid: senderJid,
-      sender_name: pushName,
-      content: text,
-      type,
-      timestamp,
-      message_id: msg.key.id,
-    });
-  }
+  } catch(e) { console.error('[processGroupMessage]', e.message); }
+  await saveMessage({ message_id: msg.key.id, jid: groupJid, direction: 'in', type, content, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: senderJid, sender_name: pushName, media_data: mediaData });
+  if (io) io.emit('message:new', { jid: groupJid, is_group: true, group_name: groupName, sender_jid: senderJid, sender_name: pushName, content, type, timestamp, message_id: msg.key.id });
 }
 
-// ─── Process incoming message ─────────────────────────────────────────────────
+// ─── Procesar mensaje ENTRANTE en tiempo real ─────────────────────────────────
 
 async function processMessage(msg) {
   if (!msg.message || msg.key.fromMe) return;
-
   const rawJid = msg.key.remoteJid;
   if (!rawJid || rawJid.includes('broadcast')) return;
-  
-  // Grupos: procesar separado con contexto de grupo
-  if (rawJid.endsWith('@g.us')) {
-    await processGroupMessage(msg);
-    return;
-  }
+  if (rawJid.endsWith('@g.us')) { await processGroupMessage(msg); return; }
 
   const isLid = rawJid.endsWith('@lid');
-  const rawPhone = extractPhone(rawJid);
-  const phone = isLid ? rawPhone : rawPhone.replace(/\D/g, '');
-
-  // Resolver el JID canónico: buscar si ya existe una conversación con este número
-  // (o con una variante del mismo número) para no crear duplicados
-  let jid = isLid ? rawJid : rawJid; // por defecto usar el JID exacto de WA
-  if (!isLid) {
-    // Buscar conv existente con el JID exacto primero
-    const exactConv = await queryOne('SELECT jid FROM conversations WHERE jid = ?', [rawJid]);
-    if (exactConv) {
-      jid = exactConv.jid;
-    } else {
-      // Buscar por número (puede haber variantes con/sin prefijo 9 de Argentina)
-      const altConv = await queryOne(
-        `SELECT jid FROM conversations WHERE jid LIKE ? ORDER BY updated_at DESC LIMIT 1`,
-        [`%${phone.slice(-10)}%@s.whatsapp.net`]
-      );
-      jid = altConv?.jid || rawJid;
-    }
-  }
+  // Usar el JID exacto que viene de WA — no transformar
+  const jid = rawJid;
+  const phone = extractPhone(rawJid);
 
   const { type, text, mediaData } = getMessageText(msg);
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
+  const content = text || (mediaData ? `[${mediaData.type || 'media'}]` : '');
 
-  // Para @lid: NO buscar por teléfono (el LID no es un número real).
-  // Solo buscamos/creamos contacto para JIDs con número real.
+  // Contacto (solo para números reales, no @lid)
   let contact = null;
   if (!isLid) {
     contact = await findContactByPhone(phone);
     if (!contact) {
-      const contactName = msg.pushName || null;
       try {
         const rows = await query(
           `INSERT INTO contacts (phone, name) VALUES (?, ?)
            ON CONFLICT (phone) DO UPDATE SET
-             name = CASE
-               WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
-               ELSE contacts.name
-             END
+             name = CASE WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name ELSE contacts.name END
            RETURNING id, name, phone`,
-          [phone, contactName]
+          [phone, msg.pushName || null]
         );
-        contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+        contact = rows[0] || await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
       } catch (e) {
-        await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
-        contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+        await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName || null]).catch(() => {});
+        contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
       }
-    } else if (msg.pushName && (!contact.name || contact.name === phone || contact.name === contact.phone)) {
-      await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
-      contact.name = msg.pushName;
+    } else if (msg.pushName && (!contact.name || contact.name === phone)) {
+      await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]).catch(() => {});
     }
   }
-  // Para @lid: el nombre visible es siempre el pushName de WhatsApp
-  const displayName = msg.pushName || (contact?.name) || phone;
 
-  // Actualizar contact_id en conversación si faltaba
+  const displayName = msg.pushName || contact?.name || phone;
+
   if (contact?.id) {
-    await query(
-      'UPDATE conversations SET contact_id = ? WHERE jid = ? AND contact_id IS NULL',
-      [contact.id, jid]
-    ).catch(() => {});
+    await query('UPDATE conversations SET contact_id = ? WHERE jid = ? AND contact_id IS NULL', [contact.id, jid]).catch(() => {});
   }
 
-  // Guardar mensaje — content puede ser vacío si es imagen sin caption
-  const contentIn = text || (mediaData ? `[${mediaData.type || 'media'}]` : '');
-  await saveMessage({
-    message_id: msg.key.id,
-    jid, direction: 'in', type, content: contentIn,
-    timestamp, is_auto_reply: 0, sent_by: null,
-    media_data: mediaData,
-  });
-
-  // Upsert conversación — usar contentIn para el preview de la lista
-  await upsertConversation(jid, contact?.id, contentIn || text, new Date(timestamp).toISOString(), displayName);
+  await saveMessage({ message_id: msg.key.id, jid, direction: 'in', type, content, timestamp, is_auto_reply: 0, sent_by: null, media_data: mediaData });
+  await upsertConversation(jid, contact?.id, content, new Date(timestamp).toISOString(), displayName);
 
   const conv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [jid]);
-
-  const autoHandled = await runAutoReplyBot(jid, text, conv).catch(e => {
-    console.error('Error en auto-reply:', e.message);
-    return false;
-  });
-
-  // Si el auto-reply no manejó el mensaje, intentar con el agente IA
+  const autoHandled = await runAutoReplyBot(jid, text, conv).catch(() => false);
   if (!autoHandled) {
-    runAIAgent(jid, text, sendMessage).catch(e => {
-      console.error('Error en agente IA:', e.message);
-    });
+    runAIAgent(jid, text, sendMessage).catch(e => console.error('[AI]', e.message));
   }
 
   if (io) {
-    const convFull = await queryOne(`
-      SELECT cv.*, c.name as contact_name, c.phone as contact_phone
-      FROM conversations cv LEFT JOIN contacts c ON cv.contact_id = c.id
-      WHERE cv.jid = ?`, [jid]);
-    io.emit('message:new', {
-      jid, phone,
-      contact_name: contact?.name || msg.pushName || phone,
-      content: contentIn || text, type, timestamp,
-      media_data: mediaData,
-      is_auto_reply: autoHandled,
-      message_id: msg.key.id,
-      conversation: convFull,
-    });
+    const convFull = await queryOne(
+      `SELECT cv.*, c.name as contact_name, c.phone as contact_phone
+       FROM conversations cv LEFT JOIN contacts c ON cv.contact_id = c.id WHERE cv.jid = ?`, [jid]
+    );
+    io.emit('message:new', { jid, phone, contact_name: displayName, content, type, timestamp, is_auto_reply: autoHandled, message_id: msg.key.id, conversation: convFull });
   }
 }
 
-// ─── Procesar un mensaje individual de historial (append) ────────────────────
-// Versión liviana de messaging-history.set para un único mensaje
+// ─── Procesar mensaje individual de historial ─────────────────────────────────
+
 async function processHistoryMessage(msg) {
   if (!msg.message || !msg.key?.remoteJid) return;
   const rawJid = msg.key.remoteJid;
   if (rawJid.includes('broadcast')) return;
-
   const { type, text, mediaData } = getMessageText(msg);
-  if (!text && !mediaData) return;
-
   const isGroup = rawJid.endsWith('@g.us');
-  const isLid   = rawJid.endsWith('@lid');
-  const rawPhone = extractPhone(rawJid);
-  const phone = isLid ? rawPhone : normalizePhone(rawPhone);
-  const jid   = isGroup ? rawJid : (isLid ? rawJid : `${phone}@s.whatsapp.net`);
+  const isLid = rawJid.endsWith('@lid');
+  const phone = extractPhone(rawJid);
+  const jid = rawJid;
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
   const direction = msg.key.fromMe ? 'out' : 'in';
-
-  // Si ya existe, ignorar
+  const content = text || (mediaData ? `[${mediaData.type || 'media'}]` : '[mensaje]');
   const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
   if (exists) return;
-
-  // Guardar mensaje
-  await saveMessage({
-    message_id: msg.key.id, jid, direction, type, content: text || '',
-    timestamp, is_auto_reply: 0, sent_by: null,
-    sender_jid: isGroup ? (msg.key.participant || null) : null,
-    sender_name: isGroup ? (msg.pushName || null) : null,
-    media_data: mediaData,
-  });
-
-  // Upsert conversación (sin incrementar unread — es historial)
-  if (isGroup) {
+  await saveMessage({ message_id: msg.key.id, jid, direction, type, content, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: isGroup ? (msg.key.participant || null) : null, sender_name: isGroup ? (msg.pushName || null) : null, media_data: mediaData });
+  if (!isGroup && !isLid) {
+    let contact = await findContactByPhone(phone);
+    if (!contact && msg.pushName) {
+      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName]).catch(() => {});
+      contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
+    }
+    await upsertConversationHistory(jid, contact?.id, content, new Date(timestamp).toISOString(), direction);
+    if (msg.pushName) await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?', [msg.pushName, jid]).catch(() => {});
+  } else if (isGroup) {
     let groupName = jid.split('@')[0];
     try { const meta = await getGroupMetadata(jid); if (meta?.subject) groupName = meta.subject; } catch(e) {}
     await query(
       `INSERT INTO conversations (jid, is_group, group_name, last_message, last_message_at)
        VALUES (?, 1, ?, ?, ?)
        ON CONFLICT (jid) DO UPDATE SET
-         is_group = 1,
-         group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
+         is_group = 1, group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
          last_message = CASE WHEN conversations.last_message_at < EXCLUDED.last_message_at THEN EXCLUDED.last_message ELSE conversations.last_message END,
          last_message_at = CASE WHEN conversations.last_message_at < EXCLUDED.last_message_at THEN EXCLUDED.last_message_at ELSE conversations.last_message_at END`,
-      [jid, groupName, text, new Date(timestamp).toISOString()]
+      [jid, groupName, content, new Date(timestamp).toISOString()]
     ).catch(() => {});
-  } else if (!isLid) {
-    let contact = await findContactByPhone(phone);
-    if (!contact && msg.pushName) {
-      await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName]).catch(() => {});
-      contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
-    }
-    await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
-    // Actualizar wa_push_name si falta
-    if (msg.pushName) {
-      await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?',
-        [msg.pushName, jid]).catch(() => {});
-    }
   } else {
-    // @lid: solo guardar sin crear contacto
-    await upsertConversationHistory(jid, null, text, new Date(timestamp).toISOString(), direction);
-    if (msg.pushName) {
-      await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?',
-        [msg.pushName, jid]).catch(() => {});
-    }
+    await upsertConversationHistory(jid, null, content, new Date(timestamp).toISOString(), direction);
   }
 }
 
-// ─── Mensajes enviados desde el móvil u otras sesiones WA ────────────────────
-// Cuando otro agente responde desde el teléfono o WhatsApp Web,
-// Baileys los recibe con fromMe=true y type='append' o 'notify'
-// Los capturamos para mantener registro completo en el CRM
+// ─── Mensajes salientes desde el móvil/WA Web ─────────────────────────────────
 
 async function processOutgoingMessage(msg) {
-  // Solo procesar mensajes enviados por el número conectado desde OTRA sesión
-  // (no los que el CRM ya guardó — esos tienen message_id en DB)
   if (!msg.message || !msg.key.fromMe) return;
-
   const rawJid = msg.key.remoteJid;
   if (!rawJid || rawJid.includes('broadcast')) return;
-
   const { type, text, mediaData } = getMessageText(msg);
   if (!text && !mediaData && type === 'unknown') return;
-
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
-  const isGroup = rawJid.endsWith('@g.us');
-  const isLid = rawJid.endsWith('@lid');
-
-  // Usar el JID exacto que viene de WA — NO normalizar con Argentina
-  // Si normalizamos podría no matchear con la conv existente (con/sin 9)
-  // Buscar si hay una conv existente que matchee este JID o variante
-  let jid = isGroup ? rawJid : isLid ? rawJid : rawJid;
-  if (!isGroup && !isLid) {
-    const normPhone = normalizePhone(extractPhone(rawJid));
-    const rawPhone2 = extractPhone(rawJid);
-    const existingConv = await queryOne(
-      `SELECT jid FROM conversations WHERE jid = ? OR jid = ? OR jid = ? LIMIT 1`,
-      [rawJid, `${normPhone}@s.whatsapp.net`, `${rawPhone2}@s.whatsapp.net`]
-    );
-    jid = existingConv?.jid || `${normPhone}@s.whatsapp.net`;
-  }
-
-  // Verificar si ya existe en DB (lo envió el CRM → ya guardado)
+  const jid = rawJid;
+  const content = text || (mediaData ? `[${mediaData.type || 'media'}]` : '[mensaje]');
   const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
-  if (exists) return; // ya está registrado, ignorar
-
-  // Guardar el mensaje como saliente sin agente asignado (sent_by = null)
-  const contentOut = text || (mediaData ? `[${mediaData.type || 'media'}]` : '[mensaje]');
-  await saveMessage({
-    message_id: msg.key.id,
-    jid,
-    direction: 'out',
-    type,
-    content: contentOut,
-    timestamp,
-    is_auto_reply: 0,
-    sent_by: null,
-    sender_jid: msg.key.participant || null,
-    sender_name: null,
-    media_data: mediaData,
-  });
-
-  // Actualizar last_message de la conversación
-  await query(
-    `UPDATE conversations
-     SET last_message = ?, last_message_at = ?, updated_at = NOW()
-     WHERE jid = ?`,
-    [text, new Date(timestamp).toISOString(), jid]
-  ).catch(() => {});
-
-  // Emitir al frontend para que aparezca en tiempo real
+  if (exists) return;
+  await saveMessage({ message_id: msg.key.id, jid, direction: 'out', type, content, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: msg.key.participant || null, sender_name: null, media_data: mediaData });
+  await query(`UPDATE conversations SET last_message = ?, last_message_at = ?, updated_at = NOW() WHERE jid = ?`,
+    [content, new Date(timestamp).toISOString(), jid]).catch(() => {});
   if (io) {
-    io.emit('message:sent', {
-      jid,
-      is_group: isGroup,
-      content: text,
-      timestamp,
-      direction: 'out',
-      type,
-      sent_by: null,
-      sent_by_name: '📱 Móvil',
-      sent_by_color: '#94a3b8',
-      from_device: true, // flag para que la UI lo muestre diferente
-    });
+    io.emit('message:sent', { jid, content, timestamp, direction: 'out', type, sent_by: null, sent_by_name: '📱 Móvil', sent_by_color: '#94a3b8', from_device: true, media_data: mediaData });
   }
-
-  console.log(`[fromDevice] ${jid.split('@')[0]}: ${text.substring(0, 60)}`);
+  console.log(`[fromDevice] ${jid.split('@')[0]}: ${content.substring(0, 60)}`);
 }
 
 // ─── Connect ──────────────────────────────────────────────────────────────────
 
 async function connect() {
-  // Importar Baileys dinámicamente (es un módulo ESM)
   if (!makeWASocket) {
     const baileys = await import('@whiskeysockets/baileys');
     makeWASocket = baileys.default;
@@ -743,9 +442,9 @@ async function connect() {
     auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
-    browser: ['WhatsApp CRM', 'Chrome', '121.0'],
+    browser: ['Chrome (Linux)', 'Chrome', '121.0.6167.160'],
     generateHighQualityLinkPreview: false,
-    syncFullHistory: true,   // solicitar historial al móvil
+    syncFullHistory: true,
     markOnlineOnConnect: false,
   });
 
@@ -762,13 +461,15 @@ async function connect() {
 
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = code === DisconnectReason.loggedOut;
+      console.log('Conexión cerrada. Código:', code);
       connectionStatus = 'disconnected';
-      qrData = null;
       if (io) io.emit('wa:status', { status: 'disconnected' });
-      if (!loggedOut) {
-        const delay = code === 408 ? 2000 : 5000;
-        reconnectTimer = setTimeout(connect, delay);
+      if (code === DisconnectReason.loggedOut) {
+        console.log('Sesión cerrada. Re-escanear QR.');
+      } else {
+        clearTimeout(reconnectTimer);
+        const delay = code === 440 ? 8000 : 4000;
+        reconnectTimer = setTimeout(() => connect().catch(console.error), delay);
       }
     }
 
@@ -777,7 +478,7 @@ async function connect() {
       qrData = null;
       const phone = sock.user?.id?.split(':')[0] || '';
       console.log(`WhatsApp conectado: ${phone}`);
-      // Emitir 'open' Y 'connected' para compatibilidad con frontend
+      // Emitir ambos strings — el frontend puede escuchar cualquiera
       if (io) {
         io.emit('wa:status', { status: 'open', phone });
         io.emit('wa:status', { status: 'connected', phone });
@@ -787,125 +488,110 @@ async function connect() {
 
   sock.ev.on('creds.update', saveCreds);
 
-  // Historial sincronizado desde el móvil
+  // ─── HISTORIAL ────────────────────────────────────────────────────────────────
   sock.ev.on('messaging-history.set', async ({ messages: msgs, isLatest }) => {
-    console.log(`[Historial] ${msgs.length} mensajes recibidos (isLatest: ${isLatest})`);
+    console.log(`[Historial] Recibidos: ${msgs.length} mensajes (isLatest: ${isLatest})`);
     if (io) io.emit('history:progress', { total: msgs.length, imported: 0, status: 'starting' });
+
     let imported = 0;
+    let errors = 0;
+
     for (const msg of msgs) {
       try {
         if (!msg.message || !msg.key?.remoteJid) continue;
         const rawJid = msg.key.remoteJid;
         if (rawJid.includes('broadcast')) continue;
-        // Grupos: guardar con flag is_group
+
         const isGroup = rawJid.endsWith('@g.us');
-
+        const isLid = rawJid.endsWith('@lid');
         const { type, text, mediaData } = getMessageText(msg);
-        // No filtrar por falta de texto — mensajes de media también actualizan conversaciones
-        if (!text && !mediaData && type === 'unknown') continue;
-
-        const rawPhone = extractPhone(rawJid);
-        const isLidMsg = rawJid.endsWith('@lid');
-        const phone = isLidMsg ? rawPhone : normalizePhone(rawPhone);
-        // Normalizar JID: grupos y @lid usan su JID original
-        const jid = isGroup ? rawJid : (isLidMsg ? rawJid : `${phone}@s.whatsapp.net`);
-
+        const jid = rawJid;
+        const phone = extractPhone(rawJid);
         const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
         const direction = msg.key.fromMe ? 'out' : 'in';
+        const content = text || (mediaData ? `[${mediaData.type || 'media'}]` : '[mensaje]');
 
-        // Verificar si ya existe este mensaje
+        // Verificar si ya existe
         const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
         if (exists) continue;
 
-        // Para @lid: NO crear contacto (el LID no es un teléfono real)
+        // Contacto
         let contact = null;
-        if (!isLidMsg && !isGroup) {
+        if (!isLid && !isGroup) {
           contact = await findContactByPhone(phone);
-          if (!contact) {
-            const contactName = msg.pushName || null;
+          if (!contact && msg.pushName) {
             try {
               const rows = await query(
                 `INSERT INTO contacts (phone, name) VALUES (?, ?)
-                 ON CONFLICT (phone) DO UPDATE SET
-                   name = CASE
-                     WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
-                     ELSE contacts.name
-                   END
+                 ON CONFLICT (phone) DO UPDATE SET name = CASE WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name ELSE contacts.name END
                  RETURNING id, name`,
-                [phone, contactName]
+                [phone, msg.pushName]
               );
-              contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
-            } catch (e) {
-              await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
-              contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+              contact = rows[0] || await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
+            } catch(e) {
+              await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName]).catch(() => {});
+              contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
             }
-          } else if (msg.pushName && (!contact.name || contact.name === phone)) {
-            await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
-            contact.name = msg.pushName;
           }
         }
 
-        const senderJidHist = isGroup ? (msg.key.participant || '') : null;
-        const senderNameHist = isGroup ? (msg.pushName || null) : null;
-        const mediaDataHist = mediaData || null;
-        const contentHist = text || (mediaData ? `[${mediaData.type}]` : '[mensaje]');
-        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: contentHist, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: senderJidHist, sender_name: senderNameHist, media_data: mediaDataHist });
+        const senderJid = isGroup ? (msg.key.participant || null) : null;
+        const senderName = isGroup ? (msg.pushName || null) : null;
+        await saveMessage({ message_id: msg.key.id, jid, direction, type, content, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: senderJid, sender_name: senderName, media_data: mediaData || null });
+
         if (isGroup) {
-          // Para grupos usar upsertGroup en vez del upsert normal
           let groupName = jid.split('@')[0];
           try { const meta = await getGroupMetadata(jid); if (meta?.subject) groupName = meta.subject; } catch(e) {}
           await query(
             `INSERT INTO conversations (jid, is_group, group_name, last_message, last_message_at)
              VALUES (?, 1, ?, ?, ?)
              ON CONFLICT (jid) DO UPDATE SET
-               is_group = 1,
-               group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
-               last_message = CASE WHEN EXCLUDED.last_message_at >= conversations.last_message_at THEN EXCLUDED.last_message ELSE conversations.last_message END,
-               last_message_at = CASE WHEN conversations.last_message_at > EXCLUDED.last_message_at THEN conversations.last_message_at ELSE EXCLUDED.last_message_at END`,
-            [jid, groupName, text, new Date(timestamp).toISOString()]
+               is_group = 1, group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
+               last_message = CASE WHEN conversations.last_message_at < EXCLUDED.last_message_at THEN EXCLUDED.last_message ELSE conversations.last_message END,
+               last_message_at = CASE WHEN conversations.last_message_at < EXCLUDED.last_message_at THEN EXCLUDED.last_message_at ELSE conversations.last_message_at END`,
+            [jid, groupName, content, new Date(timestamp).toISOString()]
           ).catch(() => {});
         } else {
-          await upsertConversationHistory(jid, contact?.id, text, new Date(timestamp).toISOString(), direction);
+          await upsertConversationHistory(jid, contact?.id, content, new Date(timestamp).toISOString(), direction);
+          if (msg.pushName) {
+            await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?', [msg.pushName, jid]).catch(() => {});
+          }
         }
+
         imported++;
-        // Emitir progreso cada 50 mensajes
         if (imported % 50 === 0 && io) {
           io.emit('history:progress', { total: msgs.length, imported, status: 'importing' });
+          console.log(`[Historial] Importados: ${imported}/${msgs.length}`);
         }
       } catch (e) {
-        // Loguear el error pero continuar — no debe crashear el loop
-        if (e.message && !e.message.includes('duplicate')) {
-          console.error('[Historial] Error en mensaje:', e.message?.substring(0, 80));
+        errors++;
+        if (!e.message?.includes('duplicate') && !e.message?.includes('unique')) {
+          console.error('[Historial] Error:', e.message?.substring(0, 100));
         }
       }
     }
-    console.log(`Historial procesado: ${imported} mensajes nuevos`);
-    // Siempre emitir para que el frontend recargue aunque imported=0
+
+    console.log(`[Historial] COMPLETADO: ${imported} importados, ${errors} errores`);
     if (io) io.emit('history:synced', { count: imported, isLatest });
   });
 
-  // Actualizar cache de grupos cuando cambian
+  // ─── MENSAJES EN TIEMPO REAL ───────────────────────────────────────────────
   sock.ev.on('groups.update', async (updates) => {
     for (const update of updates) {
       if (!update.id) continue;
-      _groupCache.delete(update.id); // invalidar cache
+      _groupCache.delete(update.id);
       if (update.subject) {
-        await query(
-          `UPDATE conversations SET group_name = ? WHERE jid = ?`,
-          [update.subject, update.id]
-        ).catch(() => {});
+        await query('UPDATE conversations SET group_name = ? WHERE jid = ?', [update.subject, update.id]).catch(() => {});
         if (io) io.emit('group:updated', { jid: update.id, group_name: update.subject });
       }
     }
   });
 
-  // Cuando entramos a un grupo o se actualiza lista
   sock.ev.on('groups.upsert', async (groups) => {
     for (const group of groups) {
       _groupCache.set(group.id, group);
       await query(
-        `INSERT INTO conversations (jid, is_group, group_name, last_message_at)
-         VALUES (?, 1, ?, NOW())
+        `INSERT INTO conversations (jid, is_group, group_name, last_message_at) VALUES (?, 1, ?, NOW())
          ON CONFLICT (jid) DO UPDATE SET is_group = 1, group_name = COALESCE(EXCLUDED.group_name, conversations.group_name)`,
         [group.id, group.subject || group.id.split('@')[0]]
       ).catch(() => {});
@@ -913,41 +599,23 @@ async function connect() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages: msgs, type }) => {
-    // type='notify'  → mensaje nuevo en tiempo real (entrante O enviado en este dispositivo)
-    // type='append'  → puede ser:
-    //   a) historial viejo al sincronizar (timestamp antiguo)
-    //   b) mensaje enviado desde WA Web u otra sesión (timestamp reciente, fromMe=true)
     if (type !== 'notify' && type !== 'append') return;
 
-    const RECENT_MS = 5 * 60 * 1000; // 5 minutos = "mensaje reciente"
+    const RECENT_MS = 5 * 60 * 1000;
     const now = Date.now();
 
     for (const msg of msgs) {
       if (msg.key?.fromMe) {
         const ts = (msg.messageTimestamp || 0) * 1000;
         const isRecent = (now - ts) < RECENT_MS;
-
-        // Procesar si:
-        // a) type='notify' → siempre (enviado ahora desde otra sesión)
-        // b) type='append' + timestamp reciente → enviado desde WA Web/móvil
-        // NO procesar si type='append' + timestamp viejo → historial, ya lo maneja messaging-history.set
         if (type === 'notify' || (type === 'append' && isRecent)) {
-          await processOutgoingMessage(msg).catch(e =>
-            console.error('Error procesando msg saliente:', e.message)
-          );
+          await processOutgoingMessage(msg).catch(e => console.error('[outgoing]', e.message));
         }
       } else {
         if (type === 'notify') {
-          // Mensaje entrante nuevo en tiempo real
-          await processMessage(msg).catch(e =>
-            console.error('Error procesando mensaje:', e.message)
-          );
+          await processMessage(msg).catch(e => console.error('[incoming]', e.message));
         } else if (type === 'append') {
-          // Historial entrante — procesarlo igual que messaging-history.set
-          // Esto garantiza que los mensajes lleguen aunque messaging-history.set no dispare
-          await processHistoryMessage(msg).catch(e =>
-            console.error('Error procesando historial append:', e.message)
-          );
+          await processHistoryMessage(msg).catch(e => console.error('[history append]', e.message));
         }
       }
     }
@@ -957,24 +625,16 @@ async function connect() {
 // ─── Send message ─────────────────────────────────────────────────────────────
 
 async function sendMessage(phone, text, sentBy = null) {
-  if (!sock || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp no está conectado');
-  }
+  if (!sock || connectionStatus !== 'connected') throw new Error('WhatsApp no está conectado');
 
-  // Determinar el JID correcto para enviar.
-  // Si 'phone' ya contiene '@' es un JID completo (puede ser @lid, @s.whatsapp.net, @g.us)
-  // Si no, normalizar como número argentino → @s.whatsapp.net
-  // NUNCA llamar onWhatsApp() — causa "Esperando mensaje" en el destinatario
-  // cuando resuelve un @lid y el envío queda en modo pendiente.
   let convJid;
-  if (phone.includes('@')) {
-    convJid = phone; // ya es JID completo
+  if (String(phone).includes('@')) {
+    convJid = phone;
   } else {
-    convJid = normalizeJid(phone);
+    convJid = `${normalizePhone(phone)}@s.whatsapp.net`;
   }
 
-  // Typing indicator — solo si es @s.whatsapp.net (no @lid ni grupos)
-  // presenceSubscribe en @lid o cuentas Business causa "Esperando mensaje"
+  // Typing indicator solo para @s.whatsapp.net (no @lid — causa "Esperando")
   if (convJid.endsWith('@s.whatsapp.net')) {
     await sock.sendPresenceUpdate('composing', convJid).catch(() => {});
     const typingMs = Math.min(Math.max(text.length * 25, 600), 2500);
@@ -984,32 +644,13 @@ async function sendMessage(phone, text, sentBy = null) {
 
   const sent = await sock.sendMessage(convJid, { text });
 
-  await saveMessage({
-    message_id: sent.key.id,
-    jid: convJid, direction: 'out', type: 'text',
-    content: text, timestamp: Date.now(),
-    is_auto_reply: 0, sent_by: sentBy,
-  });
+  await saveMessage({ message_id: sent.key.id, jid: convJid, direction: 'out', type: 'text', content: text, timestamp: Date.now(), is_auto_reply: 0, sent_by: sentBy });
 
   const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [convJid]);
   if (existing) {
-    await query(
-      `UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`,
-      [text, convJid]
-    );
+    await query(`UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`, [text, convJid]);
   } else {
-    // Intentar encontrar la conversación por variantes del número
-    const phoneOnly = phone.replace(/\D/g,'');
-    const altConv = await queryOne(
-      `SELECT jid FROM conversations WHERE jid LIKE ? OR jid LIKE ?`,
-      [`%${phoneOnly}%`, `%${normalizePhone(phoneOnly)}%`]
-    );
-    const targetJid = altConv?.jid || convJid;
-    await query(
-      `INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, NOW())
-       ON CONFLICT (jid) DO UPDATE SET last_message = EXCLUDED.last_message, last_message_at = NOW()`,
-      [targetJid, text]
-    ).catch(() => {});
+    await query(`INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, NOW()) ON CONFLICT (jid) DO UPDATE SET last_message = EXCLUDED.last_message, last_message_at = NOW()`, [convJid, text]).catch(() => {});
   }
 
   if (io) {
@@ -1019,216 +660,74 @@ async function sendMessage(phone, text, sentBy = null) {
       sentByName = user?.display_name || null;
       sentByColor = user?.color || null;
     }
-    io.emit('message:sent', {
-      jid: convJid,
-      content: text,
-      timestamp: Date.now(),
-      direction: 'out',
-      type: 'text',
-      sent_by: sentBy,
-      sent_by_name: sentByName,
-      sent_by_color: sentByColor,
-    });
+    io.emit('message:sent', { jid: convJid, content: text, timestamp: Date.now(), direction: 'out', type: 'text', sent_by: sentBy, sent_by_name: sentByName, sent_by_color: sentByColor });
   }
 
+  return sent;
+}
+
+async function sendGroupMessage(groupJid, text, sentBy = null) {
+  if (!sock || connectionStatus !== 'connected') throw new Error('WhatsApp no está conectado');
+  if (!groupJid.endsWith('@g.us')) throw new Error('JID de grupo inválido');
+  await sock.sendPresenceUpdate('composing', groupJid).catch(() => {});
+  const typingMs = Math.min(Math.max(text.length * 20, 400), 2000);
+  await new Promise(r => setTimeout(r, typingMs));
+  await sock.sendPresenceUpdate('paused', groupJid).catch(() => {});
+  const sent = await sock.sendMessage(groupJid, { text });
+  await saveMessage({ message_id: sent.key.id, jid: groupJid, direction: 'out', type: 'text', content: text, timestamp: Date.now(), is_auto_reply: 0, sent_by: sentBy });
+  await query(`UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`, [text, groupJid]).catch(() => {});
+  if (io) {
+    let sentByName = null, sentByColor = null;
+    if (sentBy) {
+      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
+      sentByName = user?.display_name || null; sentByColor = user?.color || null;
+    }
+    io.emit('message:sent', { jid: groupJid, is_group: true, content: text, timestamp: Date.now(), direction: 'out', type: 'text', sent_by: sentBy, sent_by_name: sentByName, sent_by_color: sentByColor });
+  }
   return sent;
 }
 
 async function sendFile(phone, filePath, mimeType, fileName, caption = '', sentBy = null) {
   if (!sock || connectionStatus !== 'connected') throw new Error('WhatsApp no está conectado');
-
-  const jid = normalizeJid(phone);
+  const jid = String(phone).includes('@') ? phone : normalizeJid(phone);
   const fileBuffer = fs.readFileSync(filePath);
-
   let message;
-  if (mimeType.startsWith('image/')) {
-    message = { image: fileBuffer, caption, fileName };
-  } else if (mimeType.startsWith('video/')) {
-    message = { video: fileBuffer, caption, fileName };
-  } else if (mimeType.startsWith('audio/')) {
-    message = { audio: fileBuffer, mimetype: mimeType };
-  } else {
-    message = { document: fileBuffer, mimetype: mimeType, fileName, caption };
-  }
-
-  // No usar presenceSubscribe en archivos — puede causar "Esperando mensaje"
+  if (mimeType.startsWith('image/')) message = { image: fileBuffer, caption, fileName };
+  else if (mimeType.startsWith('video/')) message = { video: fileBuffer, caption, fileName };
+  else if (mimeType.startsWith('audio/')) message = { audio: fileBuffer, mimetype: mimeType };
+  else message = { document: fileBuffer, mimetype: mimeType, fileName, caption };
   const sent = await sock.sendMessage(jid, message);
-
   const content = caption || `[${fileName}]`;
-  await saveMessage({
-    message_id: sent.key.id,
-    jid, direction: 'out', type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage',
-    content, timestamp: Date.now(), is_auto_reply: 0, sent_by: sentBy,
-  });
-
-  const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [jid]);
-  if (existing) {
-    await query(`UPDATE conversations SET last_message = ?, last_message_at = datetime('now'), updated_at = datetime('now') WHERE jid = ?`, [content, jid]);
-  } else {
-    await query(`INSERT INTO conversations (jid, last_message, last_message_at) VALUES (?, ?, datetime('now'))`, [jid, content]);
-  }
-
-  if (io) {
-    let sentByName = null, sentByColor = null;
-    if (sentBy) {
-      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
-      sentByName = user?.display_name || null;
-      sentByColor = user?.color || null;
-    }
-    io.emit('message:sent', {
-      jid: normalizeJid(phone),
-      content,
-      timestamp: Date.now(),
-      sent_by: sentBy,
-      sent_by_name: sentByName,
-      sent_by_color: sentByColor,
-      type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage',
-    });
-  }
+  await saveMessage({ message_id: sent.key.id, jid, direction: 'out', type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage', content, timestamp: Date.now(), is_auto_reply: 0, sent_by: sentBy });
+  await query(`UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`, [content, jid]).catch(() => {});
+  if (io) io.emit('message:sent', { jid, content, timestamp: Date.now(), direction: 'out', type: mimeType.startsWith('image/') ? 'imageMessage' : 'documentMessage', sent_by: sentBy, sent_by_name: null, sent_by_color: null });
   return sent;
 }
 
 async function logout() {
-  if (sock) {
-    await sock.logout().catch(() => {});
-    sock = null;
-  }
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  if (fs.existsSync(AUTH_PATH)) {
-    fs.rmSync(AUTH_PATH, { recursive: true, force: true });
-    fs.mkdirSync(AUTH_PATH, { recursive: true });
-  }
+  try { await sock?.logout(); } catch(e) {}
   connectionStatus = 'disconnected';
   qrData = null;
-  setTimeout(connect, 1000);
+  if (io) io.emit('wa:status', { status: 'disconnected' });
 }
 
-// Fuerza re-sincronización del historial desde el teléfono
-// Usa fetchMessageHistory de Baileys que pide historial por JID específico
 async function requestHistoryResync() {
-  if (!sock || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp no conectado');
-  }
-
-  console.log('[Resync] Iniciando re-sincronización de historial...');
-
-  // Obtener las conversaciones más recientes con sus últimos mensajes
-  const convs = await query(
-    `SELECT c.jid, m.message_id, m.timestamp, m.direction
-     FROM conversations c
-     LEFT JOIN messages m ON m.jid = c.jid
-     WHERE c.jid NOT LIKE '%@g.us%'
-       AND c.jid NOT LIKE '%@lid%'
-       AND m.message_id IS NOT NULL
-     ORDER BY m.timestamp ASC
-     LIMIT 1`
-  ).catch(() => []);
-
-  let requested = 0;
-
-  // Método 1: fetchMessageHistory (Baileys 6.x) — pide historial con el mensaje más antiguo
-  if (sock.fetchMessageHistory && convs.length > 0) {
-    try {
-      const oldest = convs[0];
-      const oldestKey = {
-        remoteJid: oldest.jid,
-        fromMe: oldest.direction === 'out',
-        id: oldest.message_id,
-      };
-      await sock.fetchMessageHistory(50, oldestKey, oldest.timestamp / 1000);
-      requested++;
-      console.log('[Resync] fetchMessageHistory enviado para:', oldest.jid);
-    } catch(e) {
-      console.log('[Resync] fetchMessageHistory falló:', e.message);
-    }
-  }
-
-  // Método 2: dirty sync IQ (fuerza al servidor a marcar historial como pendiente)
+  if (!sock || connectionStatus !== 'connected') throw new Error('WhatsApp no conectado');
+  console.log('[Resync] Iniciando re-sincronización...');
   try {
-    await sock.sendNode({
-      tag: 'iq',
-      attrs: { to: 's.whatsapp.net', type: 'set',
-               id: sock.generateMessageTag?.() || `resync_${Date.now()}`,
-               xmlns: 'urn:xmpp:whatsapp:dirty' },
-      content: [{ tag: 'clean', attrs: { type: 'account_sync' } }]
-    });
-    requested++;
-    console.log('[Resync] dirty sync IQ enviado');
-  } catch(e) {
-    console.log('[Resync] dirty sync falló:', e.message);
-  }
-
-  // Método 3: desconectar y reconectar para forzar historial inicial
-  // WhatsApp manda messaging-history.set al reconectar con syncFullHistory:true
-  if (requested === 0) {
-    console.log('[Resync] Reconectando para forzar historial...');
-    try {
-      sock.end(undefined); // desconectar limpiamente (reconexión automática)
-    } catch(e) { /* ignorar */ }
-  }
-
-  if (io) io.emit('history:syncing', { requested });
-  return true;
-}
-
-
-// ─── Enviar mensaje a grupo ────────────────────────────────────────────────────
-
-async function sendGroupMessage(groupJid, text, sentBy = null) {
-  if (!sock || connectionStatus !== 'connected') {
-    throw new Error('WhatsApp no está conectado');
-  }
-  if (!groupJid.endsWith('@g.us')) throw new Error('JID de grupo inválido');
-
-  // Typing indicator en grupos (siempre @g.us, no causa problemas)
-  await sock.sendPresenceUpdate('composing', groupJid).catch(() => {});
-  const typingMs = Math.min(Math.max(text.length * 20, 400), 2000);
-  await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', groupJid).catch(() => {});
-
-  const sent = await sock.sendMessage(groupJid, { text });
-
-  // Guardar en DB como mensaje saliente del grupo
-  await saveMessage({
-    message_id: sent.key.id,
-    jid: groupJid,
-    direction: 'out',
-    type: 'text',
-    content: text,
-    timestamp: Date.now(),
-    is_auto_reply: 0,
-    sent_by: sentBy,
-    sender_jid: null,
-    sender_name: null,
-  });
-
-  // Actualizar última conversación del grupo
-  await query(
-    `UPDATE conversations SET last_message = ?, last_message_at = NOW(), updated_at = NOW() WHERE jid = ?`,
-    [text, groupJid]
-  ).catch(() => {});
-
-  if (io) {
-    let sentByName = null, sentByColor = null;
-    if (sentBy) {
-      const user = await queryOne('SELECT display_name, color FROM users WHERE id = ?', [sentBy]).catch(() => null);
-      sentByName = user?.display_name || null;
-      sentByColor = user?.color || null;
+    const convs = await query(`SELECT c.jid, m.message_id, m.timestamp, m.direction FROM conversations c LEFT JOIN messages m ON m.jid = c.jid WHERE c.jid NOT LIKE '%@g.us%' AND c.jid NOT LIKE '%@lid%' AND m.message_id IS NOT NULL ORDER BY m.timestamp ASC LIMIT 1`).catch(() => []);
+    if (sock.fetchMessageHistory && convs.length > 0) {
+      const oldest = convs[0];
+      await sock.fetchMessageHistory(50, { remoteJid: oldest.jid, fromMe: oldest.direction === 'out', id: oldest.message_id }, oldest.timestamp / 1000);
+      console.log('[Resync] fetchMessageHistory enviado');
     }
-    io.emit('message:sent', {
-      jid: groupJid,
-      is_group: true,
-      content: text,
-      timestamp: Date.now(),
-      direction: 'out',
-      type: 'text',
-      sent_by: sentBy,
-      sent_by_name: sentByName,
-      sent_by_color: sentByColor,
-    });
-  }
-
-  return sent;
+  } catch(e) { console.log('[Resync] fetchMessageHistory falló:', e.message); }
+  try {
+    await sock.sendNode({ tag: 'iq', attrs: { to: 's.whatsapp.net', type: 'set', id: sock.generateMessageTag?.() || `resync_${Date.now()}`, xmlns: 'urn:xmpp:whatsapp:dirty' }, content: [{ tag: 'clean', attrs: { type: 'account_sync' } }] });
+    console.log('[Resync] dirty sync enviado');
+  } catch(e) { console.log('[Resync] dirty sync falló:', e.message); }
+  if (io) io.emit('history:syncing', {});
+  return true;
 }
 
 module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync };
