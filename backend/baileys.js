@@ -38,15 +38,10 @@ function normalizePhone(raw) {
   // Quitar prefijo de JID si viene con @
   p = p.split('@')[0];
 
-  // Argentina: si empieza con 54 y el siguiente dígito NO es 9, insertar 9
-  // Ej: 5411XXXXXXXX -> 54911XXXXXXXX
-  // Ej: 5491XXXXXXXX -> 5491XXXXXXXX (ya correcto)
-  if (p.startsWith('54') && p.length >= 10) {
-    const sinPrefijo = p.slice(2);
-    if (!sinPrefijo.startsWith('9')) {
-      p = '549' + sinPrefijo;
-    }
-  }
+  // Sin normalización de país específica — el sistema opera globalmente
+  // WhatsApp ya maneja los números en formato E.164 internacionalmente
+  // La normalización Argentina (+9) causaba que números de España, México, etc.
+  // no encontraran sus conversaciones existentes
 
   return p;
 }
@@ -760,7 +755,11 @@ async function connect() {
       qrData = null;
       const phone = sock.user?.id?.split(':')[0] || '';
       console.log(`WhatsApp conectado: ${phone}`);
-      if (io) io.emit('wa:status', { status: 'connected', phone });
+      // Emitir 'open' Y 'connected' para compatibilidad con frontend
+      if (io) {
+        io.emit('wa:status', { status: 'open', phone });
+        io.emit('wa:status', { status: 'connected', phone });
+      }
     }
   });
 
@@ -779,8 +778,9 @@ async function connect() {
         // Grupos: guardar con flag is_group
         const isGroup = rawJid.endsWith('@g.us');
 
-        const { type, text } = getMessageText(msg);
-        if (!text) continue;
+        const { type, text, mediaData } = getMessageText(msg);
+        // No filtrar por falta de texto — mensajes de media también actualizan conversaciones
+        if (!text && !mediaData && type === 'unknown') continue;
 
         const rawPhone = extractPhone(rawJid);
         const isLidMsg = rawJid.endsWith('@lid');
@@ -825,7 +825,9 @@ async function connect() {
 
         const senderJidHist = isGroup ? (msg.key.participant || '') : null;
         const senderNameHist = isGroup ? (msg.pushName || null) : null;
-        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: text, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: senderJidHist, sender_name: senderNameHist });
+        const mediaDataHist = mediaData || null;
+        const contentHist = text || (mediaData ? `[${mediaData.type}]` : '[mensaje]');
+        await saveMessage({ message_id: msg.key.id, jid, direction, type, content: contentHist, timestamp, is_auto_reply: 0, sent_by: null, sender_jid: senderJidHist, sender_name: senderNameHist, media_data: mediaDataHist });
         if (isGroup) {
           // Para grupos usar upsertGroup en vez del upsert normal
           let groupName = jid.split('@')[0];
@@ -849,7 +851,10 @@ async function connect() {
           io.emit('history:progress', { total: msgs.length, imported, status: 'importing' });
         }
       } catch (e) {
-        // silencioso — mensajes históricos no deben crashear
+        // Loguear el error pero continuar — no debe crashear el loop
+        if (e.message && !e.message.includes('duplicate')) {
+          console.error('[Historial] Error en mensaje:', e.message?.substring(0, 80));
+        }
       }
     }
     console.log(`Historial procesado: ${imported} mensajes nuevos`);

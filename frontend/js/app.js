@@ -90,14 +90,21 @@ async function apiFetch(path, opts = {}) {
 socket.on('wa:status', ({ status, phone }) => {
   updateWAStatus(status, phone);
   // Cuando conecta, mostrar banner de sincronización
-  if (status === 'open') {
-    showSyncBanner();
-    // Fallback: si history:synced no llega en 30s, recargar igual
-    setTimeout(() => {
+  if (status === 'open' || status === 'connected') {
+    // Mostrar banner de sync solo si no hay datos cargados todavía
+    // Si ya tenemos conversaciones, es una reconexión — no hace falta el banner
+    if (S.conversations.length === 0) {
+      showSyncBanner();
+    }
+    // Siempre recargar datos al conectar
+    loadConversations();
+    // Fallback: ocultar banner en 15s si history:synced no llega
+    clearTimeout(window._syncFallbackTimer);
+    window._syncFallbackTimer = setTimeout(() => {
       hideSyncBanner();
       loadConversations();
       if (S.activeJid) loadMessages(S.activeJid);
-    }, 30000);
+    }, 15000);
   }
 });
 
@@ -204,9 +211,9 @@ socket.on('history:progress', ({ total, imported, status }) => {
 });
 
 socket.on('history:synced', ({ count, isLatest }) => {
+  clearTimeout(window._syncFallbackTimer);
   hideSyncBanner();
-  if (count > 0) notify(`📥 ${count} mensajes importados`);
-  // Primero recargar lista, luego mensajes del chat activo
+  if (count > 0) notify(`📥 ${count} mensajes sincronizados`);
   loadConversations().then(() => {
     if (S.activeJid) loadMessages(S.activeJid);
   });
@@ -2110,9 +2117,13 @@ function showSyncBanner() {
     document.body.insertBefore(banner, document.body.firstChild);
   }
   banner.style.display = 'flex';
-  // Auto-ocultar después de 3 minutos si no llegó el evento history:synced
+  // Auto-ocultar después de 15 segundos si no llegó el evento history:synced
+  // El historial llega rápido o no llega — no tiene sentido esperar 3 minutos
   clearTimeout(_syncBannerTimeout);
-  _syncBannerTimeout = setTimeout(() => hideSyncBanner(), 3 * 60 * 1000);
+  _syncBannerTimeout = setTimeout(() => {
+    hideSyncBanner();
+    loadConversations(); // recargar aunque no haya llegado el evento
+  }, 15000);
 }
 function hideSyncBanner() {
   const banner = document.getElementById('sync-banner');
