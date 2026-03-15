@@ -86,7 +86,15 @@ async function apiFetch(path, opts = {}) {
 socket.on('wa:status', ({ status, phone }) => {
   updateWAStatus(status, phone);
   // Cuando conecta, mostrar banner de sincronización
-  if (status === 'open') showSyncBanner();
+  if (status === 'open') {
+    showSyncBanner();
+    // Fallback: si history:synced no llega en 30s, recargar igual
+    setTimeout(() => {
+      hideSyncBanner();
+      loadConversations();
+      if (S.activeJid) loadMessages(S.activeJid);
+    }, 30000);
+  }
 });
 
 socket.on('wa:qr', ({ qr }) => {
@@ -182,12 +190,13 @@ socket.on('group:updated', ({ jid, group_name }) => {
   }
 });
 
-socket.on('history:synced', ({ count }) => {
+socket.on('history:synced', ({ count, isLatest }) => {
   hideSyncBanner();
-  notify(`📥 ${count} mensajes importados desde WhatsApp`);
-  loadConversations();
-  // Si hay conversación activa, recargar sus mensajes
-  if (S.activeJid) loadMessages(S.activeJid);
+  if (count > 0) notify(`📥 ${count} mensajes importados`);
+  // Primero recargar lista, luego mensajes del chat activo
+  loadConversations().then(() => {
+    if (S.activeJid) loadMessages(S.activeJid);
+  });
 });
 
 socket.on('typing:remote', ({ jid, user }) => {
@@ -629,6 +638,13 @@ function renderMessages(msgs) {
   }).join('');
 
   el.scrollTop = el.scrollHeight;
+}
+
+// Recarga solo los mensajes del chat activo
+async function loadMessages(jid) {
+  if (!jid) return;
+  const msgs = await apiFetch(`/conversations/${encodeURIComponent(jid)}/messages`) || [];
+  renderMessages(msgs);
 }
 
 function appendMessage(msg) {
@@ -1489,133 +1505,6 @@ async function viewCampaignContacts(id) { editCampaign(id); }
 async function createCampaign() { saveCampaign(); }
 
 
-
-function renderCampaignsGrid() {
-  const el = document.getElementById('campaigns-grid');
-  if (!S.campaigns.length) {
-    el.innerHTML = '<div class="list-empty" style="grid-column:span 2">No hay campañas. Creá una para empezar.</div>';
-    return;
-  }
-  el.innerHTML = S.campaigns.map(c => {
-    const pct = c.total > 0 ? Math.round((c.sent / c.total) * 100) : 0;
-    const canStart = c.status === 'draft' && c.total > 0;
-    const isRunning = c.status === 'running';
-    return `
-    <div class="camp-card">
-      <div class="camp-card-top">
-        <div>
-          <div class="camp-card-name">${esc(c.name)}</div>
-          <div class="camp-card-type">${c.type} · ${c.created_by_name || 'Sistema'}</div>
-        </div>
-        <span class="status-pill ${c.status}">${c.status}</span>
-      </div>
-      <div class="camp-template">${esc(c.template.substring(0, 120))}${c.template.length > 120 ? '...' : ''}</div>
-      ${c.total > 0 ? `
-        <div class="camp-progress"><div class="camp-progress-bar" style="width:${pct}%"></div></div>
-        <div class="camp-stats">
-          <span class="camp-stat">Total: <b>${c.total}</b></span>
-          <span class="camp-stat sent">Enviados: <b>${c.sent}</b></span>
-          <span class="camp-stat failed">Fallidos: <b>${c.failed}</b></span>
-        </div>` : '<div style="font-size:12px;color:var(--text3)">Sin contactos cargados</div>'}
-      <div class="camp-actions">
-        ${canStart ? `<button class="btn-primary btn-sm" onclick="startCampaign(${c.id})">▶ Iniciar</button>` : ''}
-        ${isRunning ? `<button class="btn-danger btn-sm" onclick="cancelActiveCampaign()">⛔ Cancelar</button>` : ''}
-        <button class="btn-secondary btn-sm" onclick="viewCampaignContacts(${c.id})">📋 Ver contactos</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-function openCampaignModal() {
-  document.getElementById('c-name').value = '';
-  document.getElementById('c-template').value = '';
-  document.getElementById('c-contacts').value = '';
-  document.getElementById('c-preview').style.display = 'none';
-  document.getElementById('c-schedule').value = '';
-  openModal('modal-campaign');
-}
-
-function loadCampaignCSV(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const lines = e.target.result.split('\n').filter(l => l.trim());
-    const start = /nombre|phone|telefono/i.test(lines[0]) ? 1 : 0;
-    document.getElementById('c-contacts').value = lines.slice(start).join('\n');
-  };
-  reader.readAsText(file);
-}
-
-function previewMsg() {
-  const template = document.getElementById('c-template').value;
-  const first = document.getElementById('c-contacts').value.trim().split('\n')[0];
-  if (!first) return;
-  const [phone, name, extra] = first.split(',').map(s => s.trim());
-  const preview = template
-    .replace(/\{\{nombre\}\}/gi, name || phone)
-    .replace(/\{\{empresa\}\}/gi, '')
-    .replace(/\{\{extra\}\}/gi, extra || '')
-    .replace(/\{\{telefono\}\}/gi, phone);
-  const el = document.getElementById('c-preview');
-  el.textContent = preview;
-  el.style.display = 'block';
-}
-
-async function createCampaign() {
-  const name = document.getElementById('c-name').value.trim();
-  const template = document.getElementById('c-template').value.trim();
-  const raw = document.getElementById('c-contacts').value.trim();
-
-  if (!name || !template) { notify('Nombre y plantilla son obligatorios', 'error'); return; }
-
-  const contacts = raw ? raw.split('\n').filter(l => l.trim()).map(line => {
-    const [phone, name2, extra] = line.split(',').map(s => s.trim());
-    return { phone, name: name2 || '', extra: extra || '' };
-  }).filter(c => c.phone?.replace(/\D/g, '').length >= 7) : [];
-
-  const res = await apiFetch('/campaigns', {
-    method: 'POST',
-    body: JSON.stringify({
-      name,
-      type: document.getElementById('c-type').value,
-      template,
-      delay_min: parseInt(document.getElementById('c-dmin').value),
-      delay_max: parseInt(document.getElementById('c-dmax').value),
-      scheduled_at: document.getElementById('c-schedule').value || null,
-      contacts,
-    }),
-  });
-
-  if (res?.id) {
-    closeModal('modal-campaign');
-    loadCampaigns();
-    notify(`✅ Campaña "${name}" creada con ${contacts.length} contactos`);
-  } else {
-    notify(res?.error || 'Error creando campaña', 'error');
-  }
-}
-
-async function startCampaign(id) {
-  const res = await apiFetch(`/campaigns/${id}/start`, { method: 'POST' });
-  if (res?.error) notify(res.error, 'error');
-  else { S.activeCampaignId = id; loadCampaigns(); }
-}
-
-async function cancelActiveCampaign() {
-  if (!S.activeCampaignId) return;
-  await apiFetch(`/campaigns/${S.activeCampaignId}/cancel`, { method: 'POST' });
-}
-
-async function viewCampaignContacts(id) {
-  const contacts = await apiFetch(`/campaigns/${id}/contacts`) || [];
-  const camp = S.campaigns.find(c => c.id === id);
-  const lines = contacts.map(c => {
-    const icon = c.status === 'sent' ? '✅' : c.status === 'failed' ? '❌' : '⏳';
-    return `${icon} ${c.name || c.phone} (${c.status})${c.error ? ' — ' + c.error : ''}`;
-  }).join('\n');
-  alert(`Campaña: ${camp?.name}\n\n${lines || 'Sin contactos'}`);
-}
 
 // ═══════════════════════════════════════════════════════════════
 // CONTACTS

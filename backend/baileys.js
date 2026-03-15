@@ -628,9 +628,10 @@ async function connect() {
         if (!text) continue;
 
         const rawPhone = extractPhone(rawJid);
-        const phone = normalizePhone(rawPhone);
-        // Normalizar JID: grupos usan su JID original, individuales se normalizan
-        const jid = isGroup ? rawJid : (rawJid.includes('@lid') ? rawJid : `${phone}@s.whatsapp.net`);
+        const isLidMsg = rawJid.endsWith('@lid');
+        const phone = isLidMsg ? rawPhone : normalizePhone(rawPhone);
+        // Normalizar JID: grupos y @lid usan su JID original
+        const jid = isGroup ? rawJid : (isLidMsg ? rawJid : `${phone}@s.whatsapp.net`);
 
         const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
         const direction = msg.key.fromMe ? 'out' : 'in';
@@ -639,29 +640,32 @@ async function connect() {
         const exists = await queryOne('SELECT id FROM messages WHERE message_id = ?', [msg.key.id]);
         if (exists) continue;
 
-        // Upsert contacto — no usar teléfono como nombre
-        let contact = await findContactByPhone(phone);
-        if (!contact) {
-          const contactName = msg.pushName || null;
-          try {
-            const rows = await query(
-              `INSERT INTO contacts (phone, name) VALUES (?, ?)
-               ON CONFLICT (phone) DO UPDATE SET
-                 name = CASE
-                   WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
-                   ELSE contacts.name
-                 END
-               RETURNING id, name`,
-              [phone, contactName]
-            );
-            contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
-          } catch (e) {
-            await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
-            contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+        // Para @lid: NO crear contacto (el LID no es un teléfono real)
+        let contact = null;
+        if (!isLidMsg && !isGroup) {
+          contact = await findContactByPhone(phone);
+          if (!contact) {
+            const contactName = msg.pushName || null;
+            try {
+              const rows = await query(
+                `INSERT INTO contacts (phone, name) VALUES (?, ?)
+                 ON CONFLICT (phone) DO UPDATE SET
+                   name = CASE
+                     WHEN contacts.name IS NULL OR contacts.name = EXCLUDED.phone THEN EXCLUDED.name
+                     ELSE contacts.name
+                   END
+                 RETURNING id, name`,
+                [phone, contactName]
+              );
+              contact = rows[0] || await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+            } catch (e) {
+              await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, contactName]);
+              contact = await queryOne('SELECT id, name FROM contacts WHERE phone = ?', [phone]);
+            }
+          } else if (msg.pushName && (!contact.name || contact.name === phone)) {
+            await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
+            contact.name = msg.pushName;
           }
-        } else if (msg.pushName && (!contact.name || contact.name === phone)) {
-          await query('UPDATE contacts SET name = ? WHERE id = ?', [msg.pushName, contact.id]);
-          contact.name = msg.pushName;
         }
 
         const senderJidHist = isGroup ? (msg.key.participant || '') : null;
@@ -678,7 +682,7 @@ async function connect() {
                is_group = 1,
                group_name = COALESCE(EXCLUDED.group_name, conversations.group_name),
                last_message = CASE WHEN EXCLUDED.last_message_at >= conversations.last_message_at THEN EXCLUDED.last_message ELSE conversations.last_message END,
-               last_message_at = GREATEST(conversations.last_message_at, EXCLUDED.last_message_at)`,
+               last_message_at = CASE WHEN conversations.last_message_at > EXCLUDED.last_message_at THEN conversations.last_message_at ELSE EXCLUDED.last_message_at END`,
             [jid, groupName, text, new Date(timestamp).toISOString()]
           ).catch(() => {});
         } else {
@@ -689,10 +693,9 @@ async function connect() {
         // silencioso — mensajes históricos no deben crashear
       }
     }
-    if (imported > 0) {
-      console.log(`Historial importado: ${imported} mensajes nuevos`);
-      if (io) io.emit('history:synced', { count: imported });
-    }
+    console.log(`Historial procesado: ${imported} mensajes nuevos`);
+    // Siempre emitir para que el frontend recargue aunque imported=0
+    if (io) io.emit('history:synced', { count: imported, isLatest });
   });
 
   // Actualizar cache de grupos cuando cambian

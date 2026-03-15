@@ -417,10 +417,10 @@ router.post('/campaigns', requireAuth, async (req, res) => {
   if (!name || !template) return res.status(400).json({ error: 'name y template requeridos' });
 
   const rows = await query(
-    'INSERT INTO campaigns (name, type, template, delay_min, delay_max, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO campaigns (name, type, template, delay_min, delay_max, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
     [name, type || 'general', template, delay_min || 8, delay_max || 25, scheduled_at || null, req.session.user.id]
   );
-  const campaignId = rows[0]?.lastInsertRowid;
+  const campaignId = rows[0]?.id || rows[0]?.lastInsertRowid;
 
   if (contactList?.length) {
     for (const c of contactList) {
@@ -493,10 +493,40 @@ router.post('/campaigns/:id/reset', requireAuth, async (req, res) => {
   const camp = await queryOne('SELECT status FROM campaigns WHERE id = ?', [req.params.id]);
   if (camp?.status === 'running') return res.status(409).json({ error: 'Campaña en curso' });
   await query("UPDATE campaign_contacts SET status = 'pending', sent_at = NULL, error = NULL WHERE campaign_id = ?", [req.params.id]);
-  await query("UPDATE campaigns SET status = 'draft', sent = 0, failed = 0 WHERE id = ?", [req.params.id]);
+  const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [req.params.id]);
+  await query("UPDATE campaigns SET status = 'draft', sent = 0, failed = 0, total = ? WHERE id = ?", [cnt?.n || 0, req.params.id]);
   res.json({ ok: true });
 });
 
+
+// Duplicar campaña — copia config + contactos como draft
+router.post('/campaigns/:id/duplicate', requireAuth, async (req, res) => {
+  const src = await queryOne('SELECT * FROM campaigns WHERE id = ?', [req.params.id]);
+  if (!src) return res.status(404).json({ error: 'Campaña no encontrada' });
+
+  const rows = await query(
+    'INSERT INTO campaigns (name, type, template, delay_min, delay_max, created_by) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
+    [`${src.name} (copia)`, src.type, src.template, src.delay_min, src.delay_max, req.session.user.id]
+  );
+  const newId = rows[0]?.id || rows[0]?.lastInsertRowid;
+  if (!newId) return res.status(500).json({ error: 'Error creando copia' });
+
+  // Copiar todos los contactos como pending
+  const contacts = await query(
+    'SELECT phone, name, extra_field, contact_id FROM campaign_contacts WHERE campaign_id = ?',
+    [req.params.id]
+  );
+  for (const c of contacts) {
+    await query(
+      'INSERT INTO campaign_contacts (campaign_id, contact_id, phone, name, extra_field) VALUES (?, ?, ?, ?, ?)',
+      [newId, c.contact_id || null, c.phone, c.name || '', c.extra_field || '']
+    );
+  }
+  const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [newId]);
+  await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, newId]);
+
+  res.json({ id: newId, ok: true });
+});
 
 router.get('/campaigns/:id/contacts', requireAuth, async (req, res) => {
   res.json(await query('SELECT * FROM campaign_contacts WHERE campaign_id = ? ORDER BY id', [req.params.id]));
