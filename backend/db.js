@@ -387,6 +387,14 @@ async function runMigrations() {
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(jid, timestamp DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_jid ON conversations(jid)`,
+    `CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)`,
+    `CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(jid, timestamp DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_jid ON conversations(jid)`,
+    `CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)`,
     // CRÍTICO: timestamp en milisegundos supera el rango de INTEGER (32-bit). Necesita BIGINT.
     `ALTER TABLE messages ALTER COLUMN timestamp TYPE BIGINT`,
     `CREATE TABLE IF NOT EXISTS ai_documents (

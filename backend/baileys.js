@@ -80,56 +80,44 @@ function getMessageText(msg) {
   });
 
   switch (type) {
-    case 'conversation':        text = m.conversation || ''; break;
+    case 'conversation':       text = m.conversation || ''; break;
     case 'extendedTextMessage': text = m.extendedTextMessage?.text || ''; break;
-
     case 'imageMessage':
-      text = m.imageMessage?.caption || '[Imagen]';
+      text = m.imageMessage?.caption || '';
       mediaData = extractMedia(m.imageMessage, 'image');
+      if (!text) text = '[Imagen]';
       break;
     case 'videoMessage':
       text = m.videoMessage?.caption || '[Video]';
       mediaData = extractMedia(m.videoMessage, 'video');
       break;
     case 'audioMessage':
-      text = m.audioMessage?.ptt ? '[Nota de voz]' : '[Audio]';
+      text = '[Audio]';
       mediaData = extractMedia(m.audioMessage, 'audio');
       break;
     case 'documentMessage':
-      text = `[Archivo: ${m.documentMessage?.fileName || 'documento'}]`;
+      text = `[Archivo: ${m.documentMessage?.fileName || ''}]`;
       mediaData = extractMedia(m.documentMessage, 'document');
       break;
-    case 'stickerMessage':   text = '[Sticker 🎭]'; break;
-    case 'locationMessage':  text = '📍 Ubicación'; break;
-    case 'contactMessage':   text = `👤 Contacto: ${m.contactMessage?.displayName || ''}`; break;
-    case 'contactsArrayMessage': text = `👥 Contactos (${m.contactsArrayMessage?.contacts?.length || ''})`; break;
+    case 'stickerMessage': text = '[Sticker]'; break;
+    case 'reactionMessage':      text = ''; break;
     case 'pollCreationMessage':  text = `📊 Encuesta: ${m.pollCreationMessage?.name || ''}`; break;
     case 'pollUpdateMessage':    text = '📊 Voto en encuesta'; break;
+    case 'contactMessage':       text = `👤 Contacto: ${m.contactMessage?.displayName || ''}`; break;
+    case 'contactsArrayMessage': text = '👥 Contactos'; break;
     case 'orderMessage':         text = '🛍️ Pedido'; break;
-    case 'productMessage':       text = `🛍️ Producto: ${m.productMessage?.product?.title || ''}`; break;
-    case 'templateMessage':      text = m.templateMessage?.hydratedTemplate?.hydratedContentText || '[Plantilla]'; break;
-    case 'buttonsResponseMessage': text = m.buttonsResponseMessage?.selectedDisplayText || '[Respuesta]'; break;
-    case 'listResponseMessage':  text = m.listResponseMessage?.title || '[Respuesta de lista]'; break;
-    case 'groupInviteMessage':   text = `👥 Invitación al grupo: ${m.groupInviteMessage?.groupName || ''}`; break;
-    case 'interactiveMessage':   text = m.interactiveMessage?.body?.text || '[Mensaje interactivo]'; break;
-    case 'ephemeralMessage':     text = '⏱️ Mensaje efímero'; break;
-    case 'viewOnceMessage':      text = '👁️ Mensaje de ver una vez'; break;
-    case 'viewOnceMessageV2':    text = '👁️ Mensaje de ver una vez'; break;
-    case 'reactionMessage':      text = ''; break; // reacciones: no guardar
-
-    // Tipos internos de WA — silenciar, no mostrar en UI
+    case 'groupInviteMessage':   text = `👥 Invitación: ${m.groupInviteMessage?.groupName || ''}`; break;
+    case 'locationMessage':      text = '📍 Ubicación'; break;
     case 'protocolMessage':
     case 'senderKeyDistributionMessage':
     case 'messageContextInfo':
-    case 'highlyStructuredMessage':
-      text = ''; // vacío → se filtrará antes de guardar
-      break;
-
+    case 'ephemeralMessage':
+    case 'viewOnceMessage':
+    case 'viewOnceMessageV2':
+      text = ''; break; // mensajes técnicos — no mostrar al usuario
     default:
-      // Tipo desconocido — mostrar tipo limpio si parece útil
-      text = type && !type.toLowerCase().includes('key') && !type.toLowerCase().includes('distribution')
-        ? '' // ignorar tipos técnicos
-        : '';
+      // Tipos desconocidos: silenciar (no mostrar [tipoTécnico] en la UI)
+      text = '';
   }
   return { type: type || 'text', text, mediaData };
 }
@@ -234,21 +222,22 @@ async function saveMessage({ message_id, jid, direction, type, content, timestam
   }
 }
 
-async function upsertConversationHistory(jid, contactId, lastMessage, lastMessageAt, direction) {
+async function upsertConversationHistory(jid, contactId, lastMessage, lastMessageAt, direction, pushName = null) {
   const existing = await queryOne('SELECT id, last_message_at FROM conversations WHERE jid = ?', [jid]);
   if (existing) {
     await query(
       `UPDATE conversations SET
         contact_id = COALESCE(contact_id, ?),
+        wa_push_name = CASE WHEN ? IS NOT NULL AND ? != '' THEN ? ELSE wa_push_name END,
         last_message = CASE WHEN last_message_at < ? THEN ? ELSE last_message END,
         last_message_at = CASE WHEN last_message_at < ? THEN ? ELSE last_message_at END
        WHERE jid = ?`,
-      [contactId || null, lastMessageAt, lastMessage, lastMessageAt, lastMessageAt, jid]
+      [contactId || null, pushName, pushName, pushName, lastMessageAt, lastMessage, lastMessageAt, lastMessageAt, jid]
     );
   } else {
     await query(
-      `INSERT INTO conversations (jid, contact_id, last_message, last_message_at, unread_count) VALUES (?, ?, ?, ?, 0)`,
-      [jid, contactId || null, lastMessage, lastMessageAt]
+      `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count) VALUES (?, ?, ?, ?, ?, 0)`,
+      [jid, contactId || null, pushName, lastMessage, lastMessageAt]
     );
   }
 }
@@ -406,8 +395,7 @@ async function processHistoryMessage(msg) {
       await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)', [phone, msg.pushName]).catch(() => {});
       contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
     }
-    await upsertConversationHistory(jid, contact?.id, content, new Date(timestamp).toISOString(), direction);
-    if (msg.pushName) await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?', [msg.pushName, jid]).catch(() => {});
+    await upsertConversationHistory(jid, contact?.id, content, new Date(timestamp).toISOString(), direction, msg.pushName || null);
   } else if (isGroup) {
     let groupName = jid.split('@')[0];
     try { const meta = await getGroupMetadata(jid); if (meta?.subject) groupName = meta.subject; } catch(e) {}
@@ -421,7 +409,7 @@ async function processHistoryMessage(msg) {
       [jid, groupName, content, new Date(timestamp).toISOString()]
     ).catch(() => {});
   } else {
-    await upsertConversationHistory(jid, null, content, new Date(timestamp).toISOString(), direction);
+    await upsertConversationHistory(jid, null, content, new Date(timestamp).toISOString(), direction, msg.pushName || null);
   }
 }
 
@@ -527,9 +515,66 @@ async function connect() {
   sock.ev.on('creds.update', saveCreds);
 
   // ─── HISTORIAL ────────────────────────────────────────────────────────────────
-  sock.ev.on('messaging-history.set', async ({ messages: msgs, isLatest }) => {
-    console.log(`[Historial] Recibidos: ${msgs.length} mensajes (isLatest: ${isLatest})`);
+  sock.ev.on('messaging-history.set', async ({ messages: msgs, contacts: histContacts, isLatest }) => {
+    console.log(`[Historial] Recibidos: ${msgs.length} mensajes, ${histContacts?.length || 0} contactos (isLatest: ${isLatest})`);
     if (io) io.emit('history:progress', { total: msgs.length, imported: 0, status: 'starting' });
+
+    // Procesar contactos del historial — incluyen mapeo LID → número real + nombres
+    if (histContacts?.length) {
+      for (const c of histContacts) {
+        try {
+          // c.id puede ser @lid o @s.whatsapp.net
+          // c.lid = el LID (@lid)
+          // c.jid = el número real (@s.whatsapp.net)
+          // c.name = nombre guardado en el teléfono
+          // c.notify = nombre que el contacto tiene en WA
+          const displayName = c.name || c.notify || null;
+          const realJid = c.jid || (c.id && !c.id.endsWith('@lid') ? c.id : null);
+          const lidJid  = c.lid || (c.id && c.id.endsWith('@lid') ? c.id : null);
+
+          // Si tenemos el número real, upsert el contacto
+          if (realJid) {
+            const phone = extractPhone(realJid);
+            if (phone && displayName) {
+              await query(
+                `INSERT INTO contacts (phone, name) VALUES (?, ?)
+                 ON CONFLICT (phone) DO UPDATE SET
+                   name = CASE WHEN contacts.name IS NULL OR contacts.name = '' OR contacts.name = EXCLUDED.phone
+                                THEN EXCLUDED.name ELSE contacts.name END`,
+                [phone, displayName]
+              ).catch(() => {});
+              // Vincular contacto con conversación @lid si existe
+              if (lidJid) {
+                const contact = await queryOne('SELECT id FROM contacts WHERE phone = ?', [phone]);
+                if (contact) {
+                  await query(
+                    `UPDATE conversations SET contact_id = ?, wa_push_name = COALESCE(wa_push_name, ?)
+                     WHERE jid = ? AND (contact_id IS NULL OR wa_push_name IS NULL)`,
+                    [contact.id, displayName, lidJid]
+                  ).catch(() => {});
+                  // También actualizar wa_push_name en conv del número real
+                  await query(
+                    `UPDATE conversations SET contact_id = ?, wa_push_name = COALESCE(wa_push_name, ?)
+                     WHERE jid = ?`,
+                    [contact.id, displayName, realJid]
+                  ).catch(() => {});
+                }
+              }
+            }
+          }
+
+          // Si tenemos nombre y una conv @lid sin nombre, actualizarla
+          if (lidJid && displayName) {
+            await query(
+              `UPDATE conversations SET wa_push_name = ?
+               WHERE jid = ? AND (wa_push_name IS NULL OR wa_push_name = '')`,
+              [displayName, lidJid]
+            ).catch(() => {});
+          }
+        } catch(e) { /* ignorar errores individuales */ }
+      }
+      console.log(`[Historial] Contactos procesados: ${histContacts.length}`);
+    }
 
     let imported = 0;
     let errors = 0;
@@ -590,7 +635,7 @@ async function connect() {
             [jid, groupName, content, new Date(timestamp).toISOString()]
           ).catch(() => {});
         } else {
-          await upsertConversationHistory(jid, contact?.id, content, new Date(timestamp).toISOString(), direction);
+          await upsertConversationHistory(jid, contact?.id, content, new Date(timestamp).toISOString(), direction, msg.pushName || null);
           if (msg.pushName) {
             await query('UPDATE conversations SET wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?', [msg.pushName, jid]).catch(() => {});
           }
@@ -614,6 +659,61 @@ async function connect() {
   });
 
   // ─── MENSAJES EN TIEMPO REAL ───────────────────────────────────────────────
+  // Cuando WA comparte el número real de un contacto @lid
+  sock.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
+    if (!lid || !jid) return;
+    console.log(`[LID→Phone] ${lid} → ${jid}`);
+    const phone = extractPhone(jid);
+    try {
+      // Buscar si hay conversación con este LID
+      const lidConv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [lid]);
+      if (lidConv) {
+        // Crear/actualizar conversación con el número real
+        await query(
+          `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT (jid) DO UPDATE SET
+             contact_id = COALESCE(EXCLUDED.contact_id, conversations.contact_id),
+             wa_push_name = COALESCE(EXCLUDED.wa_push_name, conversations.wa_push_name)`,
+          [jid, lidConv.contact_id, lidConv.wa_push_name, lidConv.last_message, lidConv.last_message_at, lidConv.unread_count || 0]
+        ).catch(() => {});
+        // Mover los mensajes del LID al JID real
+        await query(`UPDATE messages SET jid = ? WHERE jid = ?`, [jid, lid]).catch(() => {});
+      }
+      // Guardar el contacto con el número real
+      const contact = await findContactByPhone(phone);
+      if (!contact && lidConv?.wa_push_name) {
+        await query('INSERT OR IGNORE INTO contacts (phone, name) VALUES (?, ?)',
+          [phone, lidConv.wa_push_name]).catch(() => {});
+      }
+      if (io) io.emit('lid:resolved', { lid, jid, phone });
+    } catch(e) { console.error('[LID→Phone]', e.message); }
+  });
+
+  // Cuando se actualizan contactos (incluye nombre + mapeo lid/jid)
+  sock.ev.on('contacts.update', async (updates) => {
+    for (const c of updates) {
+      if (!c.id) continue;
+      const name = c.notify || c.name || null;
+      if (!name) continue;
+      const jid = c.id;
+      // Actualizar wa_push_name en la conversación
+      await query(
+        `UPDATE conversations SET wa_push_name = ?
+         WHERE jid = ? AND (wa_push_name IS NULL OR wa_push_name = '')`,
+        [name, jid]
+      ).catch(() => {});
+      // Si es un número real, actualizar el contacto también
+      if (!jid.endsWith('@lid') && !jid.endsWith('@g.us')) {
+        const phone = extractPhone(jid);
+        await query(
+          `UPDATE contacts SET name = ? WHERE phone = ? AND (name IS NULL OR name = '' OR name = ?)`,
+          [name, phone, phone]
+        ).catch(() => {});
+      }
+    }
+  });
+
   sock.ev.on('groups.update', async (updates) => {
     for (const update of updates) {
       if (!update.id) continue;

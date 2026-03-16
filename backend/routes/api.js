@@ -55,7 +55,19 @@ router.post('/wa/logout', requireAuth, requireAdmin, async (req, res) => {
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
+const _loginAttempts = new Map();
+function checkLoginRateLimit(ip) {
+  const now = Date.now();
+  const entry = _loginAttempts.get(ip) || { count: 0, firstAt: now };
+  if (now - entry.firstAt > 15 * 60 * 1000) { _loginAttempts.delete(ip); return true; }
+  if (entry.count >= 10) return false;
+  _loginAttempts.set(ip, { count: entry.count + 1, firstAt: entry.firstAt });
+  return true;
+}
+
 router.post('/auth/login', async (req, res) => {
+  const ip = req.headers['x-forwarded-for'] || req.ip || 'unknown';
+  if (!checkLoginRateLimit(ip)) return res.status(429).json({ error: 'Demasiados intentos. Esperá 15 minutos.' });
   const { username, password } = req.body;
   if (!username || !password) return res.status(400).json({ error: 'Faltan credenciales' });
   const user = await queryOne('SELECT * FROM users WHERE username = ? AND is_active = 1', [username]);
@@ -1327,6 +1339,21 @@ router.post('/system/fix-names', requireAuth, requireAdmin, async (req, res) => 
     res.json({ ok: true, message: 'Nombres actualizados desde historial de mensajes' });
   } catch(e) {
     console.error('[fix-names]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Reset completo de auth para forzar historial desde cero ──────────────────
+router.post('/system/full-reset-auth', requireAuth, requireAdmin, async (req, res) => {
+  const { password } = req.body;
+  const adminUser = await queryOne('SELECT password_hash FROM users WHERE id = ?', [req.session.user.id]);
+  const valid = adminUser && await bcrypt.compare(password, adminUser.password_hash);
+  if (!valid) return res.status(403).json({ error: 'Contraseña incorrecta' });
+  try {
+    const { fullResetAuth } = require('../baileys');
+    await fullResetAuth();
+    res.json({ ok: true, message: 'Credenciales borradas. Escaneá el QR que aparecerá. WhatsApp enviará historial completo al re-vincular.' });
+  } catch(e) {
     res.status(500).json({ error: e.message });
   }
 });
