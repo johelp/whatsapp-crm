@@ -1879,6 +1879,7 @@ async function renderSettings() {
           <input class="input" type="password" id="sys-pwd-repair" placeholder="••••••••">
         </div>
         <button class="btn-secondary" onclick="systemRepairDB()">🔧 Reparar DB</button>
+        <button class="btn-secondary" onclick="systemFixNames()" title="Rellena nombres faltantes en conversaciones usando el historial de mensajes">👤 Reparar nombres</button>
       </div>
       <div id="repair-result" style="margin-top:8px;font-size:12px"></div>
 
@@ -2697,6 +2698,22 @@ async function systemResyncHistory() {
   } else {
     el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
     notify(res?.error || 'Error', 'error');
+  }
+}
+
+async function systemFixNames() {
+  const pwd = document.getElementById('sys-pwd-repair')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña primero', 'warning'); return; }
+  const el = document.getElementById('repair-result');
+  if (el) el.textContent = 'Reparando nombres...';
+  const res = await apiFetch('/system/fix-names', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+  if (res?.ok) {
+    notify('✅ Nombres reparados');
+    if (el) el.textContent = res.message || 'Nombres actualizados desde historial';
+    loadConversations();
+  } else {
+    notify(res?.error || 'Error', 'error');
+    if (el) el.textContent = res?.error || 'Error';
   }
 }
 

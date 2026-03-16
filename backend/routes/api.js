@@ -324,7 +324,19 @@ router.get('/conversations', requireAuth, async (req, res) => {
       const labels = await query(`
         SELECT l.id, l.name, l.color FROM conversation_labels cvl
         JOIN labels l ON cvl.label_id = l.id WHERE cvl.conversation_id = ?`, [row.id]);
-      if (!row.contact_name) row.contact_name = row.jid.split('@')[0];
+      if (!row.contact_name || row.contact_name === row.jid.split('@')[0]) {
+        const rawId = row.jid.split('@')[0];
+        const isLid = row.jid.endsWith('@lid');
+        if (isLid) {
+          // LID de WA (contacto con privacidad) — mostrar pushName o 'Contacto'
+          row.contact_name = row.wa_push_name || 'Contacto privado';
+        } else if (/^\d+$/.test(rawId)) {
+          // Número real — mostrar con +
+          row.contact_name = row.wa_push_name || `+${rawId}`;
+        } else {
+          row.contact_name = rawId;
+        }
+      }
       return { ...row, labels };
     }));
     res.json(result);
@@ -332,7 +344,12 @@ router.get('/conversations', requireAuth, async (req, res) => {
     console.error('Error en GET /conversations:', e.message);
     try {
       const rows = await query(`SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200`);
-      res.json(rows.map(r => ({ ...r, labels: [], contact_name: r.wa_push_name || r.jid.split('@')[0] })));
+      res.json(rows.map(r => {
+          const rawId = r.jid.split('@')[0];
+          const isLid = r.jid.endsWith('@lid');
+          const name = r.wa_push_name || (isLid ? 'Contacto privado' : (/^\d+$/.test(rawId) ? `+${rawId}` : rawId));
+          return { ...r, labels: [], contact_name: name };
+        }));
     } catch (e2) {
       res.status(500).json({ error: e2.message });
     }
@@ -1264,6 +1281,52 @@ router.post('/system/resync-history', requireAuth, requireAdmin, async (req, res
     await requestHistoryResync();
     res.json({ ok: true, message: 'Re-sincronización solicitada. Los mensajes aparecerán en los próximos minutos.' });
   } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Reparar nombres: poblar wa_push_name desde mensajes existentes ────────────
+router.post('/system/fix-names', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    // Actualizar wa_push_name en conversaciones que tienen sender_name en mensajes
+    // pero no tienen wa_push_name guardado
+    const updated = await query(`
+      UPDATE conversations SET wa_push_name = sq.push_name
+      FROM (
+        SELECT DISTINCT ON (m.jid) m.jid, m.sender_name as push_name
+        FROM messages m
+        WHERE m.direction = 'in'
+          AND m.sender_name IS NOT NULL
+          AND m.sender_name != ''
+          AND NOT m.jid LIKE '%@g.us%'
+        ORDER BY m.jid, m.timestamp DESC
+      ) sq
+      WHERE conversations.jid = sq.jid
+        AND (conversations.wa_push_name IS NULL OR conversations.wa_push_name = '')
+    `).catch(() => null);
+
+    // Para SQLite
+    if (!updated) {
+      const msgs = await query(`
+        SELECT jid, sender_name FROM messages
+        WHERE direction = 'in' AND sender_name IS NOT NULL AND sender_name != ''
+          AND jid NOT LIKE '%@g.us%'
+        GROUP BY jid ORDER BY MAX(timestamp) DESC
+      `);
+      let count = 0;
+      for (const m of msgs) {
+        await query(
+          `UPDATE conversations SET wa_push_name = ? WHERE jid = ? AND (wa_push_name IS NULL OR wa_push_name = '')`,
+          [m.sender_name, m.jid]
+        ).catch(() => {});
+        count++;
+      }
+      return res.json({ ok: true, updated: count, note: 'SQLite mode' });
+    }
+
+    res.json({ ok: true, message: 'Nombres actualizados desde historial de mensajes' });
+  } catch(e) {
+    console.error('[fix-names]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
