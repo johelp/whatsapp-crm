@@ -515,7 +515,29 @@ function renderConversationList() {
 
   el.innerHTML = convs.map(c => {
     const isGroup = c.is_group == 1 || c.jid?.endsWith('@g.us');
-    const name = c.contact_name || (isGroup ? (c.group_name || c.jid?.split('@')[0]) : c.contact_phone) || c.jid?.split('@')[0];
+    const isLid = c.jid?.endsWith('@lid');
+    const rawId = c.jid?.split('@')[0] || '';
+    // Prioridad de nombre:
+    // 1. Nombre guardado (contacto agendado)
+    // 2. wa_push_name (nombre de WA)
+    // 3. Número con +
+    // 4. Para @lid: 'Contacto privado'
+    let name;
+    if (isGroup) {
+      name = c.group_name || c.contact_name || rawId;
+    } else if (c.contact_saved_name && c.contact_saved_name !== rawId) {
+      name = c.contact_saved_name; // nombre agendado explícito
+    } else if (c.wa_push_name && c.wa_push_name !== rawId) {
+      name = c.wa_push_name; // nombre de WhatsApp
+    } else if (c.contact_name && c.contact_name !== rawId && !c.contact_name.match(/^\d+$/)) {
+      name = c.contact_name; // contact_name que no sea un número puro
+    } else if (isLid) {
+      name = c.wa_push_name || 'Contacto privado';
+    } else if (/^\d+$/.test(rawId)) {
+      name = `+${rawId}`; // número con +
+    } else {
+      name = rawId;
+    }
     const avatar = isGroup ? '👥' : (name[0]?.toUpperCase() || '?');
     const avatarStyle = isGroup ? 'font-size:18px;display:flex;align-items:center;justify-content:center;background:var(--surface3)' : '';
     const labels = (c.labels || []).map(l =>
@@ -533,7 +555,7 @@ function renderConversationList() {
           <span class="chat-name">${esc(name)}${groupBadge}</span>
           <span class="chat-time">${fmtTime(c.last_message_at)}</span>
         </div>
-        <div class="chat-preview">${esc(c.last_message || '')}</div>
+        <div class="chat-preview">${esc(cleanPreview(c.last_message))}</div>
         <div class="chat-footer">
           ${labels}
           ${assignedChip}
@@ -1879,7 +1901,6 @@ async function renderSettings() {
           <input class="input" type="password" id="sys-pwd-repair" placeholder="••••••••">
         </div>
         <button class="btn-secondary" onclick="systemRepairDB()">🔧 Reparar DB</button>
-        <button class="btn-secondary" onclick="systemFixNames()" title="Rellena nombres faltantes en conversaciones usando el historial de mensajes">👤 Reparar nombres</button>
       </div>
       <div id="repair-result" style="margin-top:8px;font-size:12px"></div>
 
@@ -2209,6 +2230,15 @@ function esc(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+// Limpia el preview del último mensaje
+function cleanPreview(text) {
+  if (!text) return '';
+  const hidden = ['[protocolMessage]','[senderKeyDistributionMessage]',
+    '[messageContextInfo]','[highlyStructuredMessage]'];
+  if (hidden.some(h => text.trim() === h)) return '';
+  return text;
 }
 
 function fmtTime(dt) {
@@ -2698,22 +2728,6 @@ async function systemResyncHistory() {
   } else {
     el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
     notify(res?.error || 'Error', 'error');
-  }
-}
-
-async function systemFixNames() {
-  const pwd = document.getElementById('sys-pwd-repair')?.value;
-  if (!pwd) { notify('Ingresá tu contraseña primero', 'warning'); return; }
-  const el = document.getElementById('repair-result');
-  if (el) el.textContent = 'Reparando nombres...';
-  const res = await apiFetch('/system/fix-names', { method: 'POST', body: JSON.stringify({ password: pwd }) });
-  if (res?.ok) {
-    notify('✅ Nombres reparados');
-    if (el) el.textContent = res.message || 'Nombres actualizados desde historial';
-    loadConversations();
-  } else {
-    notify(res?.error || 'Error', 'error');
-    if (el) el.textContent = res?.error || 'Error';
   }
 }
 

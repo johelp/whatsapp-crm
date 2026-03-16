@@ -80,31 +80,56 @@ function getMessageText(msg) {
   });
 
   switch (type) {
-    case 'conversation':       text = m.conversation || ''; break;
+    case 'conversation':        text = m.conversation || ''; break;
     case 'extendedTextMessage': text = m.extendedTextMessage?.text || ''; break;
+
     case 'imageMessage':
-      text = m.imageMessage?.caption || '';
+      text = m.imageMessage?.caption || '[Imagen]';
       mediaData = extractMedia(m.imageMessage, 'image');
-      if (!text) text = '[Imagen]';
       break;
     case 'videoMessage':
       text = m.videoMessage?.caption || '[Video]';
       mediaData = extractMedia(m.videoMessage, 'video');
       break;
     case 'audioMessage':
-      text = '[Audio]';
+      text = m.audioMessage?.ptt ? '[Nota de voz]' : '[Audio]';
       mediaData = extractMedia(m.audioMessage, 'audio');
       break;
     case 'documentMessage':
-      text = `[Archivo: ${m.documentMessage?.fileName || ''}]`;
+      text = `[Archivo: ${m.documentMessage?.fileName || 'documento'}]`;
       mediaData = extractMedia(m.documentMessage, 'document');
       break;
-    case 'stickerMessage': text = '[Sticker]'; break;
-    case 'locationMessage':
-      text = `[Ubicación]`;
+    case 'stickerMessage':   text = '[Sticker 🎭]'; break;
+    case 'locationMessage':  text = '📍 Ubicación'; break;
+    case 'contactMessage':   text = `👤 Contacto: ${m.contactMessage?.displayName || ''}`; break;
+    case 'contactsArrayMessage': text = `👥 Contactos (${m.contactsArrayMessage?.contacts?.length || ''})`; break;
+    case 'pollCreationMessage':  text = `📊 Encuesta: ${m.pollCreationMessage?.name || ''}`; break;
+    case 'pollUpdateMessage':    text = '📊 Voto en encuesta'; break;
+    case 'orderMessage':         text = '🛍️ Pedido'; break;
+    case 'productMessage':       text = `🛍️ Producto: ${m.productMessage?.product?.title || ''}`; break;
+    case 'templateMessage':      text = m.templateMessage?.hydratedTemplate?.hydratedContentText || '[Plantilla]'; break;
+    case 'buttonsResponseMessage': text = m.buttonsResponseMessage?.selectedDisplayText || '[Respuesta]'; break;
+    case 'listResponseMessage':  text = m.listResponseMessage?.title || '[Respuesta de lista]'; break;
+    case 'groupInviteMessage':   text = `👥 Invitación al grupo: ${m.groupInviteMessage?.groupName || ''}`; break;
+    case 'interactiveMessage':   text = m.interactiveMessage?.body?.text || '[Mensaje interactivo]'; break;
+    case 'ephemeralMessage':     text = '⏱️ Mensaje efímero'; break;
+    case 'viewOnceMessage':      text = '👁️ Mensaje de ver una vez'; break;
+    case 'viewOnceMessageV2':    text = '👁️ Mensaje de ver una vez'; break;
+    case 'reactionMessage':      text = ''; break; // reacciones: no guardar
+
+    // Tipos internos de WA — silenciar, no mostrar en UI
+    case 'protocolMessage':
+    case 'senderKeyDistributionMessage':
+    case 'messageContextInfo':
+    case 'highlyStructuredMessage':
+      text = ''; // vacío → se filtrará antes de guardar
       break;
-    case 'reactionMessage': text = ''; break;
-    default: text = type ? `[${type}]` : '';
+
+    default:
+      // Tipo desconocido — mostrar tipo limpio si parece útil
+      text = type && !type.toLowerCase().includes('key') && !type.toLowerCase().includes('distribution')
+        ? '' // ignorar tipos técnicos
+        : '';
   }
   return { type: type || 'text', text, mediaData };
 }
