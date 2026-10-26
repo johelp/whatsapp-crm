@@ -44,13 +44,11 @@ function estimateTokens(text) {
 
 function isWorkingHours(config) {
   if (!config.only_outside_hours) return false;
-  const now  = new Date();
-  const day  = now.getDay() || 7;
+  const { day, minutes: t } = require('./antiban').localNow();   // hora del negocio, no la del servidor
   const days = (config.working_days || '1,2,3,4,5').split(',').map(Number);
   if (!days.includes(day)) return false;
   const [sH, sM] = (config.working_hours_start || '09:00').split(':').map(Number);
   const [eH, eM] = (config.working_hours_end   || '18:00').split(':').map(Number);
-  const t = now.getHours() * 60 + now.getMinutes();
   return t >= sH * 60 + sM && t < eH * 60 + eM;
 }
 
@@ -103,7 +101,7 @@ const SUMMARY_TRIGGER = 20;
 async function getConversationMemory(jid) {
   const recent = await query(
     `SELECT direction, content FROM messages
-     WHERE jid = ? AND content IS NOT NULL AND content != '' AND type = 'text'
+     WHERE jid = ? AND content IS NOT NULL AND content != '' AND type IN ('text', 'audioMessage')
      ORDER BY timestamp DESC LIMIT ?`,
     [jid, HISTORY_WINDOW]
   );
@@ -289,6 +287,11 @@ async function _processForJid(jid, text, config, sendMessageFn) {
       console.log(`[AI v2] Handoff en ${jidShort}`);
       await query(`UPDATE conversations SET ai_disabled = 1 WHERE jid = ?`, [jid]).catch(() => {});
       await sendMessageFn(jidShort, 'Entendido, te comunico con un agente. En breve te atienden.', null);
+      // Antes solo se apagaba la IA y nadie se enteraba: ahora se asigna operador y se avisa
+      const feats = require('./ai-features');
+      await feats.autoAssign(jid, { reason: 'handoff', force: false }).catch(() => {});
+      require('./bus').emitEvent('conversation.needs_human', { jid, reason: 'handoff' });
+      require('./bus').emitEvent('conversation.updated', { jid });
       return true;
     }
 
@@ -359,8 +362,11 @@ async function runAIAgent(jid, incomingText, sendMessageFn) {
     if (!config?.api_key)    return false;
     if (config.only_outside_hours && isWorkingHours(config)) return false;
 
-    const conv = await queryOne('SELECT ai_disabled FROM conversations WHERE jid = ?', [jid]);
+    const conv = await queryOne('SELECT ai_disabled, assigned_to FROM conversations WHERE jid = ?', [jid]);
     if (conv?.ai_disabled) return false;
+    // Si un operador humano habló hace poco, la IA no le pisa la conversación
+    const human = await queryOne("SELECT MAX(timestamp) AS t FROM messages WHERE jid = ? AND direction = 'out' AND sent_by IS NOT NULL", [jid]);
+    if (human?.t && Date.now() - Number(human.t) < 30 * 60000) return false;
 
     const state = getOrCreateJidState(jid);
 
@@ -418,6 +424,7 @@ function invalidatePromptCache() {
 
 module.exports = {
   runAIAgent,
+  callProvider,
   getAIConfig,
   buildSystemPrompt,
   getMetrics,

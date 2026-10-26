@@ -10,7 +10,7 @@ const USE_PG = !!process.env.DATABASE_URL;
 
 // SQLite en memoria (sql.js)
 let sqliteDb = null;
-const DB_PATH = path.join(__dirname, '../data/crm.db');
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, '../data/crm.db');
 
 // PostgreSQL
 let pgPool;
@@ -306,6 +306,77 @@ async function createTables() {
       working_days TEXT DEFAULT '1,2,3,4,5',
       updated_at TEXT DEFAULT (datetime('now'))
     )`,
+    // ── Anti-ban e integraciones (tiempos como epoch ms BIGINT: portables SQLite/PG) ──
+    `CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS blocked_numbers (
+      phone TEXT PRIMARY KEY,
+      reason TEXT,
+      created_at BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS send_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      jid TEXT,
+      cold INTEGER DEFAULT 0,
+      kind TEXT,
+      ts BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS api_keys (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      key_hash TEXT UNIQUE NOT NULL,
+      key_prefix TEXT,
+      scopes TEXT DEFAULT 'send,read',
+      is_active INTEGER DEFAULT 1,
+      last_used_at BIGINT,
+      created_at BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS outbound_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      to_jid TEXT NOT NULL,
+      text TEXT NOT NULL,
+      event TEXT,
+      source TEXT,
+      status TEXT DEFAULT 'pending',
+      attempts INTEGER DEFAULT 0,
+      error TEXT,
+      dedupe_key TEXT UNIQUE,
+      message_id TEXT,
+      send_after BIGINT,
+      created_at BIGINT,
+      sent_at BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS notification_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      event TEXT UNIQUE NOT NULL,
+      name TEXT,
+      template TEXT NOT NULL,
+      recipients TEXT DEFAULT '[]',
+      is_active INTEGER DEFAULT 1,
+      created_at BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS webhooks (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT,
+      url TEXT NOT NULL,
+      secret TEXT,
+      events TEXT DEFAULT '*',
+      is_active INTEGER DEFAULT 1,
+      created_at BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      webhook_id INTEGER,
+      event TEXT,
+      payload TEXT,
+      status TEXT DEFAULT 'pending',
+      attempts INTEGER DEFAULT 0,
+      next_attempt BIGINT,
+      last_error TEXT,
+      created_at BIGINT
+    )`,
   ];
 
   for (const stmt of tables) {
@@ -330,7 +401,9 @@ async function seedData() {
   if (existing) return;
 
   const bcrypt = require('bcryptjs');
-  const hash = await bcrypt.hash('admin123', 10);
+  // Contraseña inicial: ADMIN_PASSWORD o una aleatoria que se muestra UNA vez en el log.
+  const initialPassword = process.env.ADMIN_PASSWORD || require('crypto').randomBytes(9).toString('base64url');
+  const hash = await bcrypt.hash(initialPassword, 10);
 
   await query(
     'INSERT INTO users (username, display_name, password_hash, role, color) VALUES (?, ?, ?, ?, ?)',
@@ -369,14 +442,14 @@ async function seedData() {
      '["name","email","phone","reason"]']
   );
 
-  console.log('Datos iniciales cargados — usuario: admin / contrasena: admin123');
+  console.log('Datos iniciales cargados — usuario: admin');
+  if (!process.env.ADMIN_PASSWORD) console.log(`Contraseña inicial de admin (guardala, no se vuelve a mostrar): ${initialPassword}`);
   saveDb();
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 
 async function runMigrations() {
-  if (!USE_PG) return;
   const migrations = [
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
@@ -400,9 +473,18 @@ async function runMigrations() {
     // ── v2: Sender por mensaje (grupos multi-participante) ───────
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+    // ── v3: clasificación IA ─────────────────────────────────────
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_intent TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_priority TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_sentiment TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_lang TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_classified_at BIGINT`,
   ];
-  for (const sql of migrations) {
-    try { await query(sql); } catch(e) { console.log('Migration skip:', e.message.substring(0,60)); }
+  for (const raw of migrations) {
+    // SQLite no soporta IF NOT EXISTS en ADD COLUMN ni ALTER COLUMN TYPE: se intenta y se ignora el error
+    if (!USE_PG && /ALTER COLUMN|CREATE TABLE/i.test(raw)) continue;
+    const sql = USE_PG ? raw : raw.replace(/ADD COLUMN IF NOT EXISTS/i, 'ADD COLUMN').replace(/TIMESTAMPTZ/g, 'TEXT');
+    try { await query(sql); } catch(e) { if (USE_PG) console.log('Migration skip:', e.message.substring(0,60)); }
   }
   console.log('Migraciones aplicadas');
 }

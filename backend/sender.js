@@ -17,8 +17,22 @@ function delay(minSec, maxSec) {
   return new Promise(r => setTimeout(r, ms));
 }
 
+// Spintax: "{Hola|Buenas|Qué tal} {{nombre}}" → variantes distintas por destinatario (evita mensajes idénticos en masa)
+function spin(text) {
+  let out = text, guard = 0;
+  while (guard++ < 20) {
+    const next = out.replace(/\{([^{}|]+(?:\|[^{}]+)+)\}/, (_, opts) => {
+      const arr = opts.split('|');
+      return arr[Math.floor(Math.random() * arr.length)];
+    });
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 function personalize(template, row) {
-  return template
+  return spin(template)
     .replace(/\{\{nombre\}\}/gi, row.name || row.phone || '')
     .replace(/\{\{empresa\}\}/gi, row.company || '')
     .replace(/\{\{extra\}\}/gi, row.extra_field || '')
@@ -47,6 +61,8 @@ async function runCampaign(campaignId, userId) {
 
   let sent = 0, failed = 0;
 
+  let pausedByGuard = false;
+  try {
   for (let i = 0; i < pending.length; i++) {
     if (cancelRequested) {
       await query("UPDATE campaigns SET status = 'cancelled' WHERE id = ?", [campaignId]);
@@ -59,7 +75,7 @@ async function runCampaign(campaignId, userId) {
 
     try {
       const cleanPhone = normalizePhone(row.phone);
-      await sendMessage(cleanPhone, text, userId);
+      await sendMessage(cleanPhone, text, userId, { kind: 'campaign' });
       await query(
         "UPDATE campaign_contacts SET status = 'sent', sent_at = CURRENT_TIMESTAMP WHERE id = ?",
         [row.id]
@@ -67,6 +83,15 @@ async function runCampaign(campaignId, userId) {
       await query('UPDATE campaigns SET sent = sent + 1 WHERE id = ?', [campaignId]);
       sent++;
     } catch (err) {
+      // Límites/horario/pausa anti-ban: no es culpa del contacto → frenar la campaña y reprogramarla
+      if (['RATE_LIMIT', 'QUIET_HOURS', 'PAUSED'].includes(err.code)) {
+        const resumeAt = new Date(err.retryAt || Date.now() + 3600000).toISOString().replace('T', ' ').substring(0, 19);
+        await query("UPDATE campaigns SET status = 'draft', scheduled_at = ? WHERE id = ?", [resumeAt, campaignId]);
+        if (io) io.emit('campaign:pause', { id: campaignId, seconds: Math.round(((err.retryAt || Date.now() + 3600000) - Date.now()) / 1000), reason: err.message });
+        console.warn(`⛔ Campaña "${campaign.name}" en pausa: ${err.message}. Se reanuda ${resumeAt} UTC`);
+        pausedByGuard = true;
+        break;
+      }
       await query(
         "UPDATE campaign_contacts SET status = 'failed', error = ? WHERE id = ?",
         [err.message, row.id]
@@ -94,10 +119,17 @@ async function runCampaign(campaignId, userId) {
         await delay(pauseSec, pauseSec + 5);
       } else {
         // Delay normal entre mensajes
-        await delay(campaign.delay_min || 8, campaign.delay_max || 25);
+        const dMin = Math.max(campaign.delay_min || 8, 8);   // piso de 8 s: menos es patrón de bot
+        await delay(dMin, Math.max(campaign.delay_max || 25, dMin + 4));
       }
     }
   }
+
+  } finally {
+    activeCampaignId = null;
+  }
+
+  if (pausedByGuard) return { sent, failed, paused: true };
 
   if (!cancelRequested) {
     await query("UPDATE campaigns SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?", [campaignId]);
@@ -105,7 +137,6 @@ async function runCampaign(campaignId, userId) {
     console.log(`✅ Campaña completada — ${sent} enviados, ${failed} fallidos`);
   }
 
-  activeCampaignId = null;
   return { sent, failed };
 }
 

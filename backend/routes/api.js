@@ -14,6 +14,7 @@ const { query, queryOne, USE_PG } = require('../db');
 const { sendMessage, sendGroupMessage, sendFile, getStatus, logout, normalizePhone } = require('../baileys');
 const { runCampaign, isRunning, requestCancel } = require('../sender');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
+const { apiKeyAuth } = require('../integrations');
 
 // Carpeta de archivos de biblioteca
 const FILES_DIR = path.join(__dirname, '../../data/files');
@@ -37,7 +38,7 @@ const fileUpload = multer({
 
 // ─── WhatsApp ─────────────────────────────────────────────────────────────────
 
-router.get('/wa/status', (req, res) => res.json(getStatus()));
+router.get('/wa/status', requireAuth, (req, res) => res.json(getStatus()));
 
 router.post('/wa/logout', requireAuth, requireAdmin, async (req, res) => {
   await logout();
@@ -46,13 +47,24 @@ router.post('/wa/logout', requireAuth, requireAdmin, async (req, res) => {
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
+const loginFails = new Map();   // ip|user -> { n, until }
 router.post('/auth/login', async (req, res) => {
   const { username, password } = req.body;
+  const lk = `${req.ip}|${String(username || '').toLowerCase()}`;
+  const lf = loginFails.get(lk);
+  if (lf && lf.until > Date.now()) {
+    return res.status(429).json({ error: 'Demasiados intentos. Probá de nuevo en unos minutos.' });
+  }
   if (!username || !password) return res.status(400).json({ error: 'Faltan credenciales' });
   const user = await queryOne('SELECT * FROM users WHERE username = ? AND is_active = 1', [username]);
-  if (!user) return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
-  const valid = await bcrypt.compare(password, user.password_hash);
-  if (!valid) return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
+  const valid = user ? await bcrypt.compare(password, user.password_hash) : false;
+  if (!valid) {
+    const n = (lf?.n || 0) + 1;
+    loginFails.set(lk, { n, until: n >= 5 ? Date.now() + 10 * 60000 : 0 });
+    return res.status(401).json({ error: 'Usuario o contraseña incorrectos' });
+  }
+  loginFails.delete(lk);
+  await new Promise((ok, ko) => req.session.regenerate(e => e ? ko(e) : ok()));   // anti session-fixation
   req.session.user = { id: user.id, username: user.username, display_name: user.display_name, role: user.role, color: user.color };
   await query('UPDATE users SET last_seen = datetime(\'now\') WHERE id = ?', [user.id]);
   res.json({ ok: true, user: req.session.user });
@@ -571,7 +583,7 @@ router.get('/activity', requireAuth, requireAdmin, async (req, res) => {
 
 // ─── AI Webhook ───────────────────────────────────────────────────────────────
 
-router.post('/ai/respond', async (req, res) => {
+router.post('/ai/respond', apiKeyAuth('send'), async (req, res) => {
   const { jid, response: text } = req.body;
   if (!jid || !text) return res.status(400).json({ error: 'jid y response requeridos' });
   try {
@@ -733,6 +745,24 @@ router.post('/ai/invalidate-cache', requireAuth, requireAdmin, async (req, res) 
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── IA: transcripción, clasificación, asignación automática ─────────────────
+router.get('/ai/features', requireAuth, requireAdmin, async (req, res) => {
+  const f = require('../ai-features');
+  res.json(f.publicFeatures(await f.getFeatures(true)));
+});
+router.put('/ai/features', requireAuth, requireAdmin, async (req, res) => {
+  const f = require('../ai-features');
+  res.json(await f.saveFeatures(req.body || {}));
+});
+router.post('/conversations/:jid/classify', requireAuth, async (req, res) => {
+  const r = await require('../ai-features').classifyConversation(decodeURIComponent(req.params.jid), { force: true });
+  r ? res.json(r) : res.status(422).json({ error: 'No se pudo clasificar (¿IA sin API key o conversación vacía?)' });
+});
+router.post('/conversations/:jid/auto-assign', requireAuth, async (req, res) => {
+  const uid = await require('../ai-features').autoAssign(decodeURIComponent(req.params.jid), { reason: 'manual', force: true });
+  uid ? res.json({ ok: true, user_id: uid }) : res.status(422).json({ error: 'No hay operadores disponibles' });
 });
 
 router.put('/ai-config', requireAuth, requireAdmin, async (req, res) => {

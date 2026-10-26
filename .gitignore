@@ -1,0 +1,6 @@
+node_modules/
+.env
+.DS_Store
+# Sesión de WhatsApp y datos: NUNCA versionar
+auth/
+data/

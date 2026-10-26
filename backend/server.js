@@ -15,17 +15,30 @@ const { initDB, USE_PG, query } = require('./db');
 const { connect, setIO, getStatus } = require('./baileys');
 const { setIO: setSenderIO, isRunning, runCampaign } = require('./sender');
 const apiRoutes = require('./routes/api');
+const v1Routes = require('./routes/v1');
+const integrationRoutes = require('./routes/integrations');
+const { startWorkers } = require('./integrations');
 const normalizerRoutes = require('./routes/normalizer');
 
 const app = express();
 const httpServer = createServer(app);
+const IS_PROD = process.env.NODE_ENV === 'production';
+// Orígenes permitidos para el panel (mismo origen por defecto). Lista separada por comas.
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || process.env.APP_URL || '').split(',').map(s => s.trim()).filter(Boolean);
+
 const io = new Server(httpServer, {
-  cors: { origin: '*', credentials: true },
+  cors: { origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : false, credentials: true },
   pingTimeout: 60000,
 });
 
 const PORT = process.env.PORT || 3000;
+if (IS_PROD && !process.env.SESSION_SECRET) {
+  console.error('FATAL: definí SESSION_SECRET en producción');
+  process.exit(1);
+}
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev_secret_change_in_prod';
+const COOKIE = { httpOnly: true, sameSite: 'lax', secure: 'auto', maxAge: 7 * 24 * 60 * 60 * 1000 };
+app.set('trust proxy', 1);   // Railway/Cloudflare: necesario para cookies secure y req.ip
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -42,21 +55,27 @@ if (USE_PG) {
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false, maxAge: 7 * 24 * 60 * 60 * 1000 },
+    cookie: COOKIE,
   });
 } else {
   sessionMiddleware = session({
     secret: SESSION_SECRET,
     resave: false,
     saveUninitialized: false,
-    cookie: { secure: false, maxAge: 7 * 24 * 60 * 60 * 1000 },
+    cookie: COOKIE,
   });
 }
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: '10mb' }));
+app.use((req, res, next) => {
+  res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'SAMEORIGIN', 'Referrer-Policy': 'same-origin' });
+  next();
+});
+// API pública v1 (API key, sin cookies): CORS abierto y sin credenciales
+app.use('/api/v1', cors({ origin: '*', allowedHeaders: ['Authorization', 'Content-Type', 'X-API-Key', 'Idempotency-Key'] }));
+app.use(cors({ origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : false, credentials: true }));
+app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(sessionMiddleware);
 
@@ -73,6 +92,8 @@ app.get('/login', (req, res) => {
 
 // ─── API (todas las rutas, auth se maneja dentro de api.js) ───────────────────
 
+app.use('/api/v1', v1Routes);
+app.use('/api/integrations', integrationRoutes);
 app.use('/api', apiRoutes);
 app.use('/api', normalizerRoutes);
 
@@ -92,6 +113,12 @@ app.get('*', requireAuth, (req, res) => {
 // ─── Socket.io ────────────────────────────────────────────────────────────────
 
 const onlineUsers = new Map();
+require('./online').setMap(onlineUsers);
+// Cambios hechos por la IA/automatizaciones → refrescar la UI de los agentes
+require('./bus').bus.on('event', (name, data) => {
+  if (name === 'conversation.updated') io.emit('conversation:updated', data);
+  if (['conversation.assigned', 'conversation.needs_human'].includes(name)) io.emit('conversation:alert', { name, ...data });
+});
 
 io.on('connection', (socket) => {
   const user = socket.request.session?.user;
@@ -153,13 +180,14 @@ async function start() {
   await initDB();
   setIO(io);
   setSenderIO(io);
+  await startWorkers();
 
   // Escuchar PRIMERO — Railway necesita que el puerto esté disponible rápido
   await new Promise(resolve => {
     httpServer.listen(PORT, () => {
       console.log(`\nWhatsApp CRM corriendo en http://localhost:${PORT}`);
       console.log(`DB: ${USE_PG ? 'PostgreSQL' : 'SQLite (local)'}`);
-      console.log(`Login: admin / admin123\n`);
+      console.log('');
       resolve();
     });
   });

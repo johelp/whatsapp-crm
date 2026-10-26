@@ -8,9 +8,14 @@ const fs = require('fs');
 const qrcode = require('qrcode');
 const { query, queryOne } = require('./db');
 const { runAIAgent } = require('./ai-agent');
+const antiban = require('./antiban');
+const aiFeatures = require('./ai-features');
+const { emitEvent } = require('./bus');
+
+const OPT_OUT_RE = /^\s*(stop|baja|unsubscribe|no molestar|no me escriban?|cancelar suscripci[oó]n|dejar de recibir)\s*[.!]*\s*$/i;
 
 // Baileys se importa dinámicamente en connect() por ser ESM puro
-let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType;
+let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType, downloadMediaMessage;
 
 const AUTH_PATH = process.env.WA_AUTH_PATH
   ? path.resolve(process.env.WA_AUTH_PATH)
@@ -23,6 +28,8 @@ let io = null;
 let qrData = null;
 let connectionStatus = 'disconnected';
 let reconnectTimer = null;
+let reconnectAttempts = 0;
+const _existsCache = new Map();   // jid consultado -> { jid, exists, at }  (evita onWhatsApp en cada envío)
 
 // Cache de metadata de grupos en memoria
 const _groupCache = new Map();
@@ -112,17 +119,31 @@ function getMessageText(msg) {
   return { type: type || 'text', text };
 }
 
+// Transcribe notas de voz/audios entrantes si la función está activa. Nunca bloquea el flujo: ante error devuelve el texto original.
+async function maybeTranscribe(msg, fallback) {
+  try {
+    const f = await aiFeatures.getFeatures();
+    if (!f.transcribe) return fallback;
+    const seconds = Number(msg.message?.audioMessage?.seconds || 0);
+    if (seconds > f.max_audio_seconds) return `${fallback} (${seconds}s, demasiado largo para transcribir)`;
+    const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger: pino({ level: 'silent' }), reuploadRequest: sock.updateMediaMessage });
+    const text = await aiFeatures.transcribeAudio(buffer, msg.message?.audioMessage?.mimetype || 'audio/ogg');
+    return text ? `🎤 ${text}` : fallback;
+  } catch (e) {
+    console.error('[transcripción]', e.message);
+    return fallback;
+  }
+}
+
 // ─── Auto-reply bot ───────────────────────────────────────────────────────────
 
 function isBusinessHours(config) {
   if (!config?.is_active) return true;
-  const now = new Date();
-  const day = now.getDay();
+  const { day, minutes: nowMin } = antiban.localNow();   // hora del negocio (APP_TZ), no la del servidor
   const workDays = (config.working_days || '1,2,3,4,5').split(',').map(Number);
   if (!workDays.includes(day)) return false;
   const [sh, sm] = config.schedule_start.split(':').map(Number);
   const [eh, em] = config.schedule_end.split(':').map(Number);
-  const nowMin = now.getHours() * 60 + now.getMinutes();
   return nowMin >= sh * 60 + sm && nowMin <= eh * 60 + em;
 }
 
@@ -176,7 +197,7 @@ async function runAutoReplyBot(jid, incomingText, conv) {
   }
 
   if (responseText && sock) {
-    await sock.sendMessage(jid, { text: responseText });
+    await antiban.gate({ jid, text: responseText, kind: 'ai' }, () => sock.sendMessage(jid, { text: responseText }));
     await saveMessage({
       message_id: `bot_${Date.now()}_${Math.random().toString(36).slice(2)}`,
       jid, direction: 'out', type: 'text',
@@ -306,6 +327,8 @@ async function processGroupMessage(msg) {
     sender_name: senderName,
   });
 
+  emitEvent('message.received', { jid: groupJid, group_name: groupName, sender_jid: senderJid, sender_name: senderName, type, text, timestamp, message_id: msg.key.id, is_group: true });
+
   const conv = await queryOne(`
     SELECT cv.*, cv.group_name as contact_name
     FROM conversations cv WHERE cv.jid = ?`, [groupJid]);
@@ -347,7 +370,10 @@ async function processMessage(msg) {
   const suffix = rawJid.includes('@lid') ? '@lid' : '@s.whatsapp.net';
   const jid = rawJid.includes('@lid') ? rawJid : `${phone}${suffix}`;
 
-  const { type, text } = getMessageText(msg);
+  const parsed = getMessageText(msg);
+  const type = parsed.type;
+  let text = parsed.text;
+  if (type === 'audioMessage') text = await maybeTranscribe(msg, text);
   const timestamp = (msg.messageTimestamp || Math.floor(Date.now() / 1000)) * 1000;
 
   // Buscar contacto existente (tolerando variantes con/sin 9)
@@ -397,16 +423,31 @@ async function processMessage(msg) {
   // Upsert conversación
   await upsertConversation(jid, contact?.id, text, new Date(timestamp).toISOString(), msg.pushName || null);
 
+  // Opt-out: "STOP" / "BAJA" → lista de bloqueo (protege la reputación del número)
+  const optedOut = OPT_OUT_RE.test(text);
+  if (optedOut) {
+    await query('INSERT OR IGNORE INTO blocked_numbers (phone, reason, created_at) VALUES (?, ?, ?)', [phone, 'opt-out por mensaje', Date.now()]).catch(() => {});
+    emitEvent('contact.opted_out', { phone, jid });
+  }
+
+  emitEvent('message.received', { jid, phone, name: contact?.name || msg.pushName || null, type, text, timestamp, message_id: msg.key.id, is_group: false });
+
   const conv = await queryOne('SELECT * FROM conversations WHERE jid = ?', [jid]);
 
-  const autoHandled = await runAutoReplyBot(jid, text, conv).catch(e => {
+  // IA: asignar operador a conversaciones sin dueño y clasificar (en background)
+  if (!optedOut) {
+    if (!conv?.assigned_to) aiFeatures.autoAssign(jid, { reason: 'new_message' }).catch(() => {});
+    aiFeatures.scheduleClassify(jid);
+  }
+
+  const autoHandled = optedOut ? true : await runAutoReplyBot(jid, text, conv).catch(e => {
     console.error('Error en auto-reply:', e.message);
     return false;
   });
 
   // Si el auto-reply no manejó el mensaje, intentar con el agente IA
   if (!autoHandled) {
-    runAIAgent(jid, text, sendMessage).catch(e => {
+    runAIAgent(jid, text, (p, t, by) => sendMessage(p, t, by, { kind: 'ai' })).catch(e => {
       console.error('Error en agente IA:', e.message);
     });
   }
@@ -438,6 +479,14 @@ async function connect() {
     DisconnectReason = baileys.DisconnectReason;
     fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
     getContentType = baileys.getContentType;
+    downloadMediaMessage = baileys.downloadMediaMessage;
+  }
+
+  // Evitar sockets duplicados (doble procesamiento y sesiones peleándose = riesgo de baneo)
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (sock) {
+    try { sock.ev.removeAllListeners(); sock.end(undefined); } catch (e) {}
+    sock = null;
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
@@ -471,15 +520,24 @@ async function connect() {
       connectionStatus = 'disconnected';
       qrData = null;
       if (io) io.emit('wa:status', { status: 'disconnected' });
-      if (!loggedOut) {
-        const delay = code === 408 ? 2000 : 5000;
-        reconnectTimer = setTimeout(connect, delay);
+      emitEvent('connection.update', { status: 'disconnected', code });
+      // 440 = otra sesión tomó este número: reconectar solo provoca una guerra de sesiones
+      const replaced = code === DisconnectReason.connectionReplaced;
+      if (replaced) {
+        console.error('Sesión reemplazada por otro dispositivo/instancia (440). No se reconecta automáticamente.');
+      } else if (!loggedOut) {
+        reconnectAttempts++;
+        const delay = Math.min(2000 * 2 ** Math.min(reconnectAttempts - 1, 6), 120000) + Math.random() * 1000;
+        console.log(`Reconectando en ${Math.round(delay / 1000)}s (intento ${reconnectAttempts}, code ${code})`);
+        reconnectTimer = setTimeout(() => connect().catch(e => console.error('reconnect:', e.message)), delay);
       }
     }
 
     if (connection === 'open') {
       connectionStatus = 'connected';
+      reconnectAttempts = 0;
       qrData = null;
+      emitEvent('connection.update', { status: 'connected' });
       const phone = sock.user?.id?.split(':')[0] || '';
       console.log(`WhatsApp conectado: ${phone}`);
       if (io) io.emit('wa:status', { status: 'connected', phone });
@@ -597,32 +655,44 @@ async function connect() {
 
 // ─── Send message ─────────────────────────────────────────────────────────────
 
-async function sendMessage(phone, text, sentBy = null) {
+async function resolveJid(baseJid) {
+  const c = _existsCache.get(baseJid);
+  if (c && Date.now() - c.at < 24 * 3600 * 1000) return c;
+  let out = { jid: baseJid, exists: null, at: Date.now() };
+  try {
+    const [result] = await sock.onWhatsApp(baseJid);
+    out = { jid: result?.exists && result?.jid ? result.jid : baseJid, exists: !!result?.exists, at: Date.now() };
+  } catch (e) { /* si falla, seguir con el JID normalizado */ }
+  if (out.exists !== null) _existsCache.set(baseJid, out);
+  return out;
+}
+
+async function sendMessage(phone, text, sentBy = null, opts = {}) {
   if (!sock || connectionStatus !== 'connected') {
     throw new Error('WhatsApp no está conectado');
   }
 
   // JID base normalizado (el que tenemos en nuestra DB)
   const baseJid = normalizeJid(phone);
+  const kind = opts.kind || 'manual';
 
-  // Resolver el JID real de WhatsApp — puede diferir del nuestro (Business ID, @lid, etc.)
-  let sendJid = baseJid;
-  try {
-    const [result] = await sock.onWhatsApp(baseJid);
-    if (result?.exists && result?.jid) {
-      sendJid = result.jid; // JID real para el envío
+  const sent = await antiban.gate({ jid: baseJid, text, kind }, async ({ cold }) => {
+    // Resolver el JID real de WhatsApp — puede diferir del nuestro (Business ID, @lid, etc.)
+    const r = await resolveJid(baseJid);
+    if (cold) antiban.reportNumberCheck(r.exists === false);
+    if (r.exists === false) {
+      throw new antiban.GateError('NOT_ON_WHATSAPP', `El número ${phone} no tiene WhatsApp`);
     }
-  } catch(e) {
-    // Si onWhatsApp falla, seguir con el JID normalizado
-  }
+    const sendJid = r.jid;
 
-  await sock.presenceSubscribe(sendJid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', sendJid);
-  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
-  await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', sendJid);
+    await sock.presenceSubscribe(sendJid).catch(() => {});
+    await sock.sendPresenceUpdate('composing', sendJid);
+    const typingMs = Math.min(Math.max(text.length * 25, 800), 3500) * (0.8 + Math.random() * 0.5);
+    await new Promise(res => setTimeout(res, typingMs));
+    await sock.sendPresenceUpdate('paused', sendJid);
 
-  const sent = await sock.sendMessage(sendJid, { text });
+    return sock.sendMessage(sendJid, { text });
+  });
 
   // Para guardar en DB siempre usar el JID que tenemos en conversaciones (baseJid)
   // Si el JID de envío difiere, buscar la conv por el JID base
@@ -679,18 +749,19 @@ async function sendMessage(phone, text, sentBy = null) {
   return sent;
 }
 
-async function sendGroupMessage(groupJid, text, sentBy = null) {
+async function sendGroupMessage(groupJid, text, sentBy = null, opts = {}) {
   if (!sock || connectionStatus !== 'connected') {
     throw new Error('WhatsApp no está conectado');
   }
 
-  await sock.presenceSubscribe(groupJid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', groupJid);
-  const typingMs = Math.min(Math.max(text.length * 25, 800), 3500);
-  await new Promise(r => setTimeout(r, typingMs));
-  await sock.sendPresenceUpdate('paused', groupJid);
-
-  const sent = await sock.sendMessage(groupJid, { text });
+  const sent = await antiban.gate({ jid: groupJid, text, kind: opts.kind || 'manual' }, async () => {
+    await sock.presenceSubscribe(groupJid).catch(() => {});
+    await sock.sendPresenceUpdate('composing', groupJid);
+    const typingMs = Math.min(Math.max(text.length * 25, 800), 3500) * (0.8 + Math.random() * 0.5);
+    await new Promise(r => setTimeout(r, typingMs));
+    await sock.sendPresenceUpdate('paused', groupJid);
+    return sock.sendMessage(groupJid, { text });
+  });
 
   // Obtener nombre del grupo para la DB
   const meta = await getGroupMetadata(groupJid);
@@ -750,12 +821,13 @@ async function sendFile(phone, filePath, mimeType, fileName, caption = '', sentB
     message = { document: fileBuffer, mimetype: mimeType, fileName, caption };
   }
 
-  await sock.presenceSubscribe(jid).catch(() => {});
-  await sock.sendPresenceUpdate('composing', jid);
-  await new Promise(r => setTimeout(r, 1000));
-  await sock.sendPresenceUpdate('paused', jid);
-
-  const sent = await sock.sendMessage(jid, message);
+  const sent = await antiban.gate({ jid, text: `file:${fileName}:${caption}`, kind: 'manual' }, async () => {
+    await sock.presenceSubscribe(jid).catch(() => {});
+    await sock.sendPresenceUpdate('composing', jid);
+    await new Promise(r => setTimeout(r, 1000 + Math.random() * 1500));
+    await sock.sendPresenceUpdate('paused', jid);
+    return sock.sendMessage(jid, message);
+  });
 
   const content = caption || `[${fileName}]`;
   await saveMessage({
