@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Guía de uso seguro — WhatsFlow</title>
+<link rel="stylesheet" href="/css/app.css">
+<style>
+  body { background: var(--bg); min-height: 100vh; padding: 24px; overflow: auto; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  .back { font-size: 12px; color: var(--text3); text-decoration: none; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); display: inline-block; margin-bottom: 18px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 26px 28px; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  .sub { font-size: 13px; color: var(--text3); margin: 0 0 8px; }
+  h3 { font-size: 15px; margin: 26px 0 8px; }
+  p, li { font-size: 14px; line-height: 1.65; color: var(--text2); }
+  li b, p b { color: var(--text); }
+  ul, ol { padding-left: 20px; display: grid; gap: 8px; margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← Volver al panel</a>
+  <div class="card">
+    <h1>Guía de uso seguro de la conexión</h1>
+    <p class="sub">Cómo funciona el modo sin API oficial, qué implica y cómo evitar problemas con tu número.</p>
+    
+<h3>1. Cómo funciona la conexión sin API oficial</h3>
+<p>WhatsFlow se vincula a tu número como un <b>dispositivo vinculado</b>, igual que WhatsApp Web: escaneás un QR desde <i>Ajustes → Dispositivos vinculados</i> y el sistema usa esa sesión para leer y enviar mensajes. Para eso utiliza una librería de terceros que emula el cliente web de WhatsApp.</p>
+<ul>
+  <li>Tu teléfono sigue siendo el dispositivo principal. WhatsApp cierra las sesiones vinculadas si el teléfono pasa unos <b>14 días sin conectarse</b>.</li>
+  <li>La sesión se guarda en el servidor de tu instalación. Si la cerrás desde el teléfono, o WhatsApp la invalida, hay que <b>escanear el QR de nuevo</b>.</li>
+  <li>Un número debe estar vinculado a <b>una sola instalación</b> a la vez. Dos instancias con la misma sesión se desconectan entre sí.</li>
+</ul>
+
+<h3>2. Qué implica (lo que conviene saber antes de empezar)</h3>
+<ul>
+  <li><b>No es un canal oficial ni respaldado por Meta.</b> Las condiciones de WhatsApp restringen la automatización y los mensajes masivos no solicitados. Meta puede limitar o bloquear un número sin aviso previo, y no existe soporte oficial ni garantía de disponibilidad para este tipo de conexión.</li>
+  <li><b>WhatsApp puede cambiar su protocolo</b> y cortar la conexión por un tiempo hasta que se actualice la librería.</li>
+  <li><b>Funciones limitadas</b> frente a la API oficial: sin plantillas aprobadas, sin botones oficiales ni sello de cuenta verificada.</li>
+  <li><b>Tu responsabilidad:</b> contar con el consentimiento de las personas a las que escribís y cumplir la normativa de protección de datos y de comunicaciones comerciales que aplique en tu país.</li>
+  <li><b>Nadie puede asegurar que un número no se bloquee.</b> WhatsFlow reduce el riesgo, no lo elimina. Para volúmenes altos o procesos críticos, la vía recomendada es la API oficial.</li>
+</ul>
+
+<h3>3. Cómo evitar problemas</h3>
+<ol>
+  <li><b>Usá un número con antigüedad y uso real.</b> Evitá números recién activados para enviar volumen.</li>
+  <li><b>Empezá de a poco y subí gradualmente.</b> El sistema lo aplica a contactos nuevos: arranca con unos 20 por día y sube 10 por día hasta un tope de 60.</li>
+  <li><b>Escribí solo a quienes te conocen o te dieron su consentimiento.</b> No uses listas compradas. Todo mensaje masivo debe permitir la baja: si alguien responde “STOP” o “BAJA”, WhatsFlow lo agrega a la lista de bloqueo y no le vuelve a escribir.</li>
+  <li><b>Evitá mensajes idénticos en masa.</b> Personalizá con el nombre y usá variantes de texto ({Hola|Buenas}). Cuidá los enlaces: los acortadores y dominios dudosos son una señal de spam.</li>
+  <li><b>Respetá los horarios.</b> A contactos nuevos no se les envía entre las 21:00 y las 08:00 (hora de tu zona).</li>
+  <li><b>Priorizá conversaciones que empiezan ellos.</b> Responder a quien te escribió es de bajo riesgo. Para avisos internos (por ejemplo una nueva orden), pedí que cada destinatario escriba “hola” primero al número, o enviá los avisos a un <b>grupo</b>.</li>
+  <li><b>Una instalación por número</b> y no uses en ese número apps modificadas de WhatsApp.</li>
+  <li><b>Mantené el teléfono conectado</b> y con la app actualizada.</li>
+  <li><b>Tené un plan B:</b> la conexión es intercambiable. Si el volumen crece o el número es crítico para el negocio, pasá a la API oficial.</li>
+</ol>
+
+<h3>4. Qué hace WhatsFlow por vos automáticamente</h3>
+<ul>
+  <li>Cola de envío con intervalos aleatorios y simulación de “escribiendo…”.</li>
+  <li>Topes distintos para contactos nuevos (15 por hora) y conversaciones existentes (120 por hora), con tope diario.</li>
+  <li>Horario silencioso, anti-duplicados y verificación de que el número tiene WhatsApp.</li>
+  <li><b>Pausa automática</b> ante errores seguidos, señales de límite de WhatsApp o listas con muchos números inexistentes.</li>
+  <li>Lista de bloqueo y respeto de la etiqueta “No contactar”.</li>
+</ul>
+<p>Estos límites se pueden ajustar, pero cuanto más los relajes, mayor es el riesgo.</p>
+
+<h3>5. Señales de alerta y qué hacer</h3>
+<ul>
+  <li><b>Señales:</b> mensajes que quedan con un solo tilde, muchas personas que te bloquean o responden “spam”, un aviso de WhatsApp de “actividad inusual”, o una pausa automática de WhatsFlow.</li>
+  <li><b>Qué hacer:</b> frená campañas y envíos automáticos 24 a 72 horas, revisá tu lista y tus textos, y no vincules y desvincules el número repetidamente. Si el número es restringido, solicitá la revisión desde la propia app de WhatsApp.</li>
+</ul>
+
+  </div>
+</div>
+<script src="/js/a11y.js"></script>
+</body>
+</html>

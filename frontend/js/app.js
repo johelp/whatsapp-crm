@@ -1973,8 +1973,8 @@ async function renderSettings() {
         <input class="input" id="ar-fields" value="${JSON.parse(autoReply.collect_fields || '["name","email","phone","reason"]').join(',')}">
         <p class="field-hint">Opciones: <code>name</code> <code>email</code> <code>phone</code> <code>reason</code></p>
       </div>
-      <div style="background:var(--blue-light);border:1px solid #bfdbfe;border-radius:var(--radius);padding:12px;margin-bottom:14px">
-        <p style="font-size:12px;color:#1e40af;font-weight:600;margin-bottom:4px">🔮 Integración IA futura</p>
+      <div style="background:var(--blue-light);border:1px solid var(--border2);border-radius:var(--radius);padding:12px;margin-bottom:14px">
+        <p style="font-size:12px;color:var(--text);font-weight:600;margin-bottom:4px">🔮 Integración IA futura</p>
         <p style="font-size:12px;color:#3b82f6">Endpoint listo: <code style="background:white;padding:1px 5px;border-radius:4px">POST /api/ai/respond</code> con <code style="background:white;padding:1px 5px;border-radius:4px">{ jid, response }</code></p>
       </div>
       <button class="btn-primary btn-sm" onclick="saveAutoReply()">💾 Guardar</button>
@@ -2408,7 +2408,7 @@ async function loadAIConfig() {
   const FREE_BADGE = '<span style="font-size:10px;background:#dcfce7;color:#16a34a;padding:1px 6px;border-radius:10px;margin-left:4px">GRATIS</span>';
 
   form.innerHTML = `
-    <div style="background:var(--blue-light);border:1px solid #bfdbfe;border-radius:var(--radius);padding:10px 14px;margin-bottom:16px;font-size:12px;color:#1e40af">
+    <div style="background:var(--blue-light);border:1px solid var(--border2);border-radius:var(--radius);padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--text)">
       💡 <b>Gemini</b> y <b>Groq</b> tienen planes gratuitos generosos para empezar.
       Gemini: <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com/apikey</a> ·
       Groq: <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a>

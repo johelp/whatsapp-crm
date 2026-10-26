@@ -446,11 +446,11 @@ async function seedData() {
   const defaultLabels = [
     ['Consulta',        '#3b82f6', 'Consulta general'],
     ['Presupuesto',     '#f59e0b', 'Solicitud de presupuesto'],
-    ['Inscripcion',     '#10b981', 'Proceso de inscripcion'],
-    ['Alquiler equipo', '#8b5cf6', 'Alquiler de equipo'],
-    ['Clase privada',   '#f97316', 'Clase privada solicitada'],
+    ['Pedido',          '#10b981', 'Pedido o compra en curso'],
+    ['Reserva',         '#8b5cf6', 'Reserva, turno o cita'],
+    ['Soporte',         '#f97316', 'Problema o reclamo a resolver'],
     ['No contactar',    '#ef4444', 'No volver a contactar'],
-    ['Resena solicitada','#06b6d4','Se pidio resena'],
+    ['Pago',            '#06b6d4', 'Pago o factura'],
     ['Seguimiento',     '#84cc16', 'Pendiente de seguimiento'],
   ];
   for (const [name, color, description] of defaultLabels) {
@@ -459,10 +459,10 @@ async function seedData() {
 
   const qrs = [
     ['Bienvenida',       '/hola',        'saludos',  `Hola {{nombre}}! Bienvenido/a a ${BRAND}. En que podemos ayudarte?`],
-    ['Horarios clases',  '/horarios',    'info',     'Nuestras clases son Lun-Vie 9:00-17:00 y fines de semana 8:00-16:00.'],
-    ['Solicitar resena', '/resena',      'resenas',  `Hola {{nombre}}! Fue un placer tenerte en ${BRAND}. Podrias dejarnos una resena? [LINK]`],
+    ['Horarios',         '/horarios',    'info',     'Atendemos de lunes a viernes de 9:00 a 18:00. Fuera de ese horario te respondemos al dia siguiente.'],
+    ['Pedir resena',     '/resena',      'resenas',  `Hola {{nombre}}! Fue un placer atenderte en ${BRAND}. Podrias dejarnos una resena? [LINK]`],
     ['Envio presupuesto','/presupuesto', 'ventas',   'Hola {{nombre}}! Te enviamos el presupuesto solicitado. Cualquier consulta avisanos.'],
-    ['Confirmar reserva','/confirmar',   'reservas', 'Perfecto {{nombre}}! Tu reserva quedo confirmada. Te esperamos!'],
+    ['Confirmar',        '/confirmar',   'reservas', 'Perfecto {{nombre}}! Quedo confirmado. Cualquier cambio avisanos.'],
   ];
   for (const [name, trigger, category, content] of qrs) {
     await query('INSERT INTO quick_replies (name, trigger_text, category, content) VALUES (?, ?, ?, ?)', [name, trigger, category, content]);

@@ -131,6 +131,13 @@ function requireAuth(req, res, next) {
   return res.redirect('/login');
 }
 
+// Raíz pública: visitantes ven la landing (con botón "Iniciar sesión" → /login); con sesión activa entran al panel
+app.use('/img', express.static(path.join(__dirname, '../landing/img'), { maxAge: '7d' }));
+app.get('/', (req, res) => {
+  const file = req.session?.user ? '../frontend/index.html' : '../landing/index.html';
+  res.sendFile(path.join(__dirname, file));
+});
+
 app.use(requireAuth, express.static(path.join(__dirname, '../frontend')));
 
 app.get('*', requireAuth, (req, res) => {

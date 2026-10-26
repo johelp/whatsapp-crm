@@ -50,8 +50,9 @@ Debe quedar clarísimo que hay **dos familias: sin API oficial y con API oficial
 4. IA (4 tarjetas).
 5. Integraciones (explicación + ejemplo de código `curl` a `/api/v1/notify`).
 6. Cómo empezar (4 pasos).
-7. Preguntas frecuentes (¿necesito API oficial?, ¿me pueden bloquear?, ¿sigo usando el celular?, ¿marca blanca?, datos y API keys, precio).
-8. CTA final + pie con aclaración: "WhatsApp es marca de Meta Platforms, Inc.; este producto no está afiliado ni respaldado por Meta."
+7. **Sección discreta (desplegable, no destacada) "Cómo funciona la conexión sin API oficial, qué implica y cómo evitar problemas"**, enlazada desde el aviso de la sección de conexión y desde el pie. Debe cubrir: (a) cómo funciona (dispositivo vinculado por QR, librería de terceros, sesión en el servidor, el teléfono debe conectarse al menos cada ~14 días, una sola instalación por número); (b) implicancias (canal no oficial, Meta puede limitar o bloquear sin aviso, sin soporte oficial, puede romperse ante cambios de WhatsApp, sin plantillas/botones/verificación, responsabilidad del cliente sobre consentimiento y normativa, imposible garantizar que no haya bloqueos); (c) buenas prácticas (número con antigüedad, empezar de a poco, solo contactos con consentimiento y baja, variar textos, respetar horarios, priorizar conversaciones entrantes, avisos internos por grupo o con "hola" previo, no usar apps modificadas, plan B con API oficial); (d) qué hace el producto automáticamente (límites, calentamiento, horario silencioso, pausas, lista de bloqueo); (e) señales de alerta y qué hacer. Tono claro y honesto, sin alarmismo ni promesas absolutas.
+8. Preguntas frecuentes (¿necesito API oficial?, ¿me pueden bloquear?, ¿sigo usando el celular?, ¿marca blanca?, datos y API keys, precio).
+9. CTA final + pie con aclaración: "WhatsApp es marca de Meta Platforms, Inc.; este producto no está afiliado ni respaldado por Meta."
 
 ## Tono y restricciones
 - Claro, concreto, sin hype. Beneficio primero, función después. Frases cortas.
