@@ -193,12 +193,18 @@ async function start() {
   });
 
   // 2. Inicializar DB (puede tardar con 25+ migraciones en PG)
-  try {
-    await initDB();
-  } catch(e) {
-    console.error('Error en initDB:', e.message);
-    // No salir — puede ser un error menor de migración
+  // Reintentar: en Railway la base puede tardar en aceptar conexiones tras un (re)despliegue
+  let dbReady = false;
+  for (let attempt = 1; attempt <= 8 && !dbReady; attempt++) {
+    try {
+      await initDB();
+      dbReady = true;
+    } catch(e) {
+      console.error(`Error en initDB (intento ${attempt}/8):`, e.message || e.code || e);
+      if (attempt < 8) await new Promise(r => setTimeout(r, Math.min(3000 * attempt, 15000)));
+    }
   }
+  if (!dbReady) { console.error('FATAL: no se pudo inicializar la base de datos'); process.exit(1); }   // Railway reinicia el servicio
 
   setIO(io);
   setSenderIO(io);
