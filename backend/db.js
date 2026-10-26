@@ -306,6 +306,23 @@ async function createTables() {
       working_days TEXT DEFAULT '1,2,3,4,5',
       updated_at TEXT DEFAULT (datetime('now'))
     )`,
+    `CREATE TABLE IF NOT EXISTS ai_documents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      content TEXT NOT NULL,
+      file_type TEXT DEFAULT 'text',
+      size INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      category TEXT DEFAULT 'general',
+      source_url TEXT,
+      auto_refresh INTEGER DEFAULT 0,
+      is_pinned INTEGER DEFAULT 0,
+      content_hash TEXT,
+      created_by INTEGER,
+      updated_at BIGINT,
+      last_fetched_at BIGINT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
     // ── Anti-ban e integraciones (tiempos como epoch ms BIGINT: portables SQLite/PG) ──
     `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -479,6 +496,15 @@ async function runMigrations() {
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_sentiment TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_lang TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_classified_at BIGINT`,
+    // ── v3: base de conocimiento ────────────────────────────────
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'`,
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS source_url TEXT`,
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS auto_refresh INTEGER DEFAULT 0`,
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS is_pinned INTEGER DEFAULT 0`,
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS content_hash TEXT`,
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS created_by INTEGER`,
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS updated_at BIGINT`,
+    `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS last_fetched_at BIGINT`,
   ];
   for (const raw of migrations) {
     // SQLite no soporta IF NOT EXISTS en ADD COLUMN ni ALTER COLUMN TYPE: se intenta y se ignora el error

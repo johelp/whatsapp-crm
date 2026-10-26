@@ -22,6 +22,8 @@ if (!fs.existsSync(FILES_DIR)) fs.mkdirSync(FILES_DIR, { recursive: true });
 
 // Multer: CSV uploads al temp
 const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 5 * 1024 * 1024 } });
+// En memoria: lo usan los endpoints que leen req.file.buffer (antes /ai-documents fallaba porque `upload` guarda a disco)
+const memUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 // Multer: biblioteca de archivos (hasta 20MB, guardados en data/files)
 const fileUpload = multer({
@@ -664,7 +666,7 @@ router.post('/ai/test', requireAuth, requireAdmin, async (req, res) => {
   if (!config?.api_key)   return res.status(400).json({ error: 'No hay API key configurada' });
 
   try {
-    const systemPrompt = await buildSystemPrompt(config, true); // forceRefresh
+    const systemPrompt = await require('../knowledge').withKnowledge(await buildSystemPrompt(config, true), req.body.message || '');
     const history      = [{ role: 'user', content: message }];
     const t0           = Date.now();
 
@@ -815,7 +817,7 @@ router.get('/ai-documents', requireAuth, requireAdmin, async (req, res) => {
   res.json(docs);
 });
 
-router.post('/ai-documents', requireAuth, requireAdmin, upload.single('file'), async (req, res) => {
+router.post('/ai-documents', requireAuth, requireAdmin, memUpload.single('file'), async (req, res) => {
   try {
     const { name } = req.body;
     if (!req.file && !req.body.text_content) return res.status(400).json({ error: 'Falta archivo o texto' });
@@ -847,10 +849,7 @@ router.post('/ai-documents', requireAuth, requireAdmin, upload.single('file'), a
     // Truncar a 50.000 caracteres para no explotar el contexto
     if (content.length > 50000) content = content.substring(0, 50000) + '\n[... documento truncado ...]';
 
-    await query(
-      `INSERT INTO ai_documents (name, content, file_type, size) VALUES (?, ?, ?, ?)`,
-      [name || req.file?.originalname || 'Documento', content, fileType, size]
-    );
+    await require('../knowledge').addDoc({ title: name || req.file?.originalname || 'Documento', content, file_type: fileType, userId: req.session.user.id });
     res.json({ ok: true });
   } catch(e) {
     console.error('Error subiendo documento IA:', e.message);
@@ -862,11 +861,12 @@ router.put('/ai-documents/:id/toggle', requireAuth, requireAdmin, async (req, re
   const doc = await queryOne('SELECT is_active FROM ai_documents WHERE id = ?', [req.params.id]);
   if (!doc) return res.status(404).json({ error: 'No encontrado' });
   await query('UPDATE ai_documents SET is_active = ? WHERE id = ?', [doc.is_active ? 0 : 1, req.params.id]);
+  require('../knowledge').touch();
   res.json({ ok: true });
 });
 
 router.delete('/ai-documents/:id', requireAuth, requireAdmin, async (req, res) => {
-  await query('DELETE FROM ai_documents WHERE id = ?', [req.params.id]);
+  await require('../knowledge').removeDoc(req.params.id);
   res.json({ ok: true });
 });
 

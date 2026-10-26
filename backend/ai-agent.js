@@ -83,8 +83,6 @@ async function buildSystemPrompt(config, forceRefresh = false) {
   if (config.company_context?.trim()) {
     lines.push('\n[EMPRESA]\n' + config.company_context.trim());
   }
-  const docCtx = await getDocumentContext();
-  if (docCtx) lines.push('\n[DOCUMENTOS]\n' + docCtx);
   if (config.system_prompt?.trim()) {
     lines.push('\n[INSTRUCCIONES]\n' + config.system_prompt.trim());
   }
@@ -295,8 +293,10 @@ async function _processForJid(jid, text, config, sendMessageFn) {
       return true;
     }
 
-    const systemPrompt = await buildSystemPrompt(config);
     const messages     = await getConversationMemory(jid);
+    // Conocimiento relevante al mensaje actual + los 2 anteriores del cliente (el prompt base queda cacheado)
+    const recentUser   = messages.filter(m => m.role === 'user').slice(-3).map(m => m.content).join(' ');
+    const systemPrompt = await require('./knowledge').withKnowledge(await buildSystemPrompt(config), `${text} ${recentUser}`);
 
     // Asegurar que el último mensaje del usuario está al final
     const last = messages[messages.length - 1];
@@ -424,6 +424,7 @@ function invalidatePromptCache() {
 
 module.exports = {
   runAIAgent,
+  getDocumentContext,
   callProvider,
   getAIConfig,
   buildSystemPrompt,

@@ -17,6 +17,7 @@ const { setIO: setSenderIO, isRunning, runCampaign } = require('./sender');
 const apiRoutes = require('./routes/api');
 const v1Routes = require('./routes/v1');
 const integrationRoutes = require('./routes/integrations');
+const knowledgeRoutes = require('./routes/knowledge');
 const { startWorkers } = require('./integrations');
 const normalizerRoutes = require('./routes/normalizer');
 
@@ -94,6 +95,7 @@ app.get('/login', (req, res) => {
 
 app.use('/api/v1', v1Routes);
 app.use('/api/integrations', integrationRoutes);
+app.use('/api/knowledge', knowledgeRoutes);
 app.use('/api', apiRoutes);
 app.use('/api', normalizerRoutes);
 
@@ -173,6 +175,9 @@ cron.schedule('* * * * *', async () => {
     }
   } catch (e) { /* silent */ }
 });
+
+// ─── Cron: refresco diario de URLs de la base de conocimiento ─────────────────
+cron.schedule('0 4 * * *', () => require('./knowledge').refreshDue().catch(e => console.error('[KB cron]', e.message)));
 
 // ─── Start ────────────────────────────────────────────────────────────────────
 

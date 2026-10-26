@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Base de conocimiento — WA CRM</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/app.css">
+<style>
+  body { background: var(--bg); min-height: 100vh; padding: 24px; overflow: auto; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .head h1 { font-size: 20px; font-weight: 600; }
+  .head p { font-size: 13px; color: var(--text3); margin-top: 2px; }
+  .back { font-size: 12px; color: var(--text3); text-decoration: none; padding: 6px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+  .back:hover { color: var(--text); border-color: var(--border2); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-xl); padding: 18px; margin-bottom: 16px; }
+  .card h3 { font-size: 13px; font-weight: 600; margin-bottom: 12px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; flex-wrap: wrap; }
+  .tab { padding: 7px 14px; border: 1.5px solid var(--border); border-radius: var(--radius); font: 500 12px 'Sora', sans-serif; cursor: pointer; background: transparent; color: var(--text3); }
+  .tab.active { background: var(--wa-light); border-color: var(--wa-mid); color: var(--wa); }
+  .pane { display: none; } .pane.active { display: block; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 10px; }
+  .row .field { flex: 1; min-width: 160px; margin: 0; }
+  .chk { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text2); cursor: pointer; }
+  textarea.input { line-height: 1.55; font-size: 13px; min-height: 120px; resize: vertical; }
+  .warn { background: var(--amber-light); border: 1px solid var(--amber); border-radius: var(--radius); padding: 8px 12px; font-size: 12px; margin: 8px 0; }
+  .doc { display: flex; gap: 12px; align-items: flex-start; padding: 12px 0; border-bottom: 1px solid var(--border); }
+  .doc:last-child { border-bottom: 0; }
+  .doc-main { flex: 1; min-width: 0; }
+  .doc-title { font-size: 13px; font-weight: 600; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .doc-prev { font-size: 12px; color: var(--text2); margin-top: 3px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+  .doc-meta { font-size: 11px; color: var(--text3); margin-top: 4px; }
+  .doc-meta a { color: var(--primary); text-decoration: none; }
+  .pill { font-size: 10px; padding: 2px 7px; border-radius: 99px; background: var(--surface2); color: var(--text2); font-weight: 500; }
+  .pill.pin { background: var(--amber-light); } .pill.off { background: var(--red-light); }
+  .acts { display: flex; gap: 4px; flex-shrink: 0; }
+  .empty { font-size: 13px; color: var(--text3); padding: 18px 0; text-align: center; }
+  .res { font-size: 12px; background: var(--surface2); border-radius: var(--radius); padding: 10px 12px; margin-top: 10px; white-space: pre-wrap; max-height: 260px; overflow: auto; }
+  #toast { position: fixed; bottom: 20px; right: 20px; background: var(--text); color: #fff; padding: 10px 16px; border-radius: var(--radius); font-size: 13px; display: none; z-index: 99; max-width: 380px; }
+  #toast.err { background: var(--red); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div>
+      <h1>🧠 Base de conocimiento</h1>
+      <p>Lo que cargues acá lo usa la IA para responder. Para cada mensaje se eligen solo los fragmentos relevantes.</p>
+    </div>
+    <a class="back" href="/">← Volver al CRM</a>
+  </div>
+
+  <div class="card">
+    <h3>Agregar conocimiento</h3>
+    <div class="tabs">
+      <button class="tab active" data-p="note">📝 Nota rápida</button>
+      <button class="tab" data-p="url">🌐 Desde una URL</button>
+      <button class="tab" data-p="file">📄 Archivo</button>
+      <button class="tab" data-p="test">🔎 Probar búsqueda</button>
+    </div>
+
+    <div class="pane active" id="p-note">
+      <div class="row">
+        <div class="field"><label>Título</label><input class="input" id="n-title" placeholder="Ej: Cambio de horarios feriado"></div>
+        <div class="field" style="max-width:200px"><label>Categoría</label><input class="input" id="n-cat" list="cats" placeholder="general"></div>
+      </div>
+      <div class="field"><label>Contenido</label><textarea class="input" id="n-content" placeholder="Precios, políticas, preguntas frecuentes, novedades del día…"></textarea></div>
+      <div class="row" style="margin-top:10px">
+        <label class="chk"><input type="checkbox" id="n-pin"> 📌 Fijar (la IA siempre lo tiene presente)</label>
+        <button class="btn-primary" onclick="saveNote()">Guardar nota</button>
+      </div>
+    </div>
+
+    <div class="pane" id="p-url">
+      <div class="row">
+        <div class="field" style="flex:3"><label>URL de la página o PDF</label><input class="input" id="u-url" placeholder="https://tusitio.com/preguntas-frecuentes"></div>
+        <button class="btn-secondary" id="u-btn" onclick="previewUrl()">Analizar</button>
+      </div>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="u-clean"> ✨ Limpiar con IA (deja solo info útil para clientes; usa tu API key)</label>
+        <label class="chk"><input type="checkbox" id="u-auto"> 🔄 Actualizar automáticamente cada semana</label>
+        <label class="chk"><input type="checkbox" id="u-pin"> 📌 Fijar</label>
+      </div>
+      <div id="u-result" style="display:none">
+        <div id="u-warn"></div>
+        <div class="row">
+          <div class="field"><label>Título</label><input class="input" id="u-title"></div>
+          <div class="field" style="max-width:200px"><label>Categoría</label><input class="input" id="u-cat" list="cats" placeholder="general"></div>
+        </div>
+        <div class="field"><label>Texto extraído (podés editarlo antes de guardar) — <span id="u-chars"></span></label><textarea class="input" id="u-text" style="min-height:220px"></textarea></div>
+        <button class="btn-primary" style="margin-top:10px" onclick="saveUrl()">Guardar en la base</button>
+      </div>
+    </div>
+
+    <div class="pane" id="p-file">
+      <div class="row">
+        <div class="field"><label>Archivo (PDF, txt, md, csv)</label><input class="input" type="file" id="f-file" accept=".pdf,.txt,.md,.csv" style="padding:4px"></div>
+        <div class="field" style="max-width:200px"><label>Categoría</label><input class="input" id="f-cat" list="cats" placeholder="general"></div>
+        <button class="btn-primary" onclick="saveFile()">Subir</button>
+      </div>
+    </div>
+
+    <div class="pane" id="p-test">
+      <div class="row">
+        <div class="field" style="flex:3"><label>Escribí una pregunta como la haría un cliente</label><input class="input" id="t-q" placeholder="¿Cuánto sale una clase privada?" onkeydown="if(event.key==='Enter')testSearch()"></div>
+        <button class="btn-secondary" onclick="testSearch()">Buscar</button>
+      </div>
+      <div id="t-res"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:4px">
+      <div class="field" style="flex:3"><label>Buscar en la base</label><input class="input" id="s-q" placeholder="Buscar por título o contenido…" oninput="debounceLoad()"></div>
+      <div class="field" style="max-width:220px"><label>Categoría</label><select class="input" id="s-cat" onchange="load()"><option value="">Todas</option></select></div>
+    </div>
+    <div id="list"><div class="empty">Cargando…</div></div>
+  </div>
+</div>
+
+<datalist id="cats"></datalist>
+<div id="toast"></div>
+
+<div id="edit-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:50;align-items:center;justify-content:center;padding:20px">
+  <div class="card" style="width:100%;max-width:720px;max-height:90vh;overflow:auto;margin:0">
+    <h3>Editar</h3>
+    <input type="hidden" id="e-id">
+    <div class="row">
+      <div class="field"><label>Título</label><input class="input" id="e-title"></div>
+      <div class="field" style="max-width:200px"><label>Categoría</label><input class="input" id="e-cat" list="cats"></div>
+    </div>
+    <div class="field"><label>Contenido</label><textarea class="input" id="e-content" style="min-height:260px"></textarea></div>
+    <div class="row" style="margin-top:10px">
+      <label class="chk"><input type="checkbox" id="e-pin"> 📌 Fijar</label>
+      <label class="chk"><input type="checkbox" id="e-auto"> 🔄 Auto-actualizar (solo URLs)</label>
+      <span style="flex:1"></span>
+      <button class="btn-secondary" onclick="closeEdit()">Cancelar</button>
+      <button class="btn-primary" onclick="saveEdit()">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg, err) { const t = $('toast'); t.textContent = msg; t.className = err ? 'err' : ''; t.style.display = 'block'; clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display = 'none', 4500); }
+
+async function api(path, opts = {}) {
+  const isForm = opts.body instanceof FormData;
+  const res = await fetch('/api/knowledge' + path, {
+    credentials: 'same-origin', ...opts,
+    headers: isForm ? undefined : { 'Content-Type': 'application/json' },
+    body: isForm || !opts.body ? opts.body : JSON.stringify(opts.body),
+  });
+  if (res.status === 401) { location.href = '/login'; throw new Error('Sesión vencida'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Error ' + res.status);
+  return data;
+}
+async function run(btn, fn) {
+  const old = btn?.textContent; if (btn) { btn.disabled = true; btn.textContent = 'Trabajando…'; }
+  try { return await fn(); } catch (e) { toast(e.message, true); } finally { if (btn) { btn.disabled = false; btn.textContent = old; } }
+}
+
+document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'p-' + b.dataset.p));
+});
+
+// ── Notas ──
+async function saveNote() {
+  await run(event.target, async () => {
+    await api('/', { method: 'POST', body: { title: $('n-title').value, content: $('n-content').value, category: $('n-cat').value, is_pinned: $('n-pin').checked } });
+    $('n-title').value = $('n-content').value = ''; toast('✅ Nota guardada'); load();
+  });
+}
+
+// ── URL ──
+async function previewUrl() {
+  await run($('u-btn'), async () => {
+    const r = await api('/url/preview', { method: 'POST', body: { url: $('u-url').value, ai_clean: $('u-clean').checked } });
+    $('u-title').value = r.title; $('u-text').value = r.text;
+    $('u-chars').textContent = r.chars.toLocaleString() + ' caracteres' + (r.cleaned ? ` (de ${r.raw_chars.toLocaleString()} originales, limpiado con IA)` : '');
+    $('u-warn').innerHTML = (r.warnings || []).map(w => `<div class="warn">⚠️ ${esc(w)}</div>`).join('');
+    $('u-result').style.display = 'block';
+  });
+}
+async function saveUrl() {
+  await run(event.target, async () => {
+    await api('/url', { method: 'POST', body: {
+      url: $('u-url').value, title: $('u-title').value, content: $('u-text').value, category: $('u-cat').value,
+      auto_refresh: $('u-auto').checked, is_pinned: $('u-pin').checked } });
+    $('u-result').style.display = 'none'; $('u-url').value = ''; toast('✅ Guardado desde URL'); load();
+  });
+}
+
+// ── Archivo ──
+async function saveFile() {
+  const f = $('f-file').files[0]; if (!f) return toast('Elegí un archivo', true);
+  await run(event.target, async () => {
+    const fd = new FormData(); fd.append('file', f); fd.append('category', $('f-cat').value);
+    await api('/file', { method: 'POST', body: fd });
+    $('f-file').value = ''; toast('✅ Archivo cargado'); load();
+  });
+}
+
+// ── Probar búsqueda ──
+async function testSearch() {
+  await run(null, async () => {
+    const r = await api('/search', { method: 'POST', body: { q: $('t-q').value } });
+    $('t-res').innerHTML = r.used.length
+      ? `<p style="font-size:12px;color:var(--text3);margin-top:8px">Fuentes: ${r.used.map(u => esc(u.title) + (u.pinned ? ' 📌' : u.score != null ? ` (${u.score})` : '')).join(' · ')}</p><div class="res">${esc(r.text)}</div>`
+      : '<div class="empty">No hay fragmentos relevantes. La IA respondería que lo consultan.</div>';
+  });
+}
+
+// ── Listado ──
+let cats = new Set(), tmr;
+function debounceLoad() { clearTimeout(tmr); tmr = setTimeout(load, 250); }
+const fmt = (t) => t ? new Date(Number(t)).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
+
+async function load() {
+  const q = encodeURIComponent($('s-q').value), c = encodeURIComponent($('s-cat').value);
+  const docs = await api(`/?search=${q}&category=${c}`).catch(e => { toast(e.message, true); return []; });
+  docs.forEach(d => d.category && cats.add(d.category));
+  $('cats').innerHTML = [...cats].map(x => `<option value="${esc(x)}">`).join('');
+  const sel = $('s-cat'), cur = sel.value;
+  sel.innerHTML = '<option value="">Todas</option>' + [...cats].sort().map(x => `<option ${x === cur ? 'selected' : ''}>${esc(x)}</option>`).join('');
+  $('list').innerHTML = docs.length ? docs.map(d => `
+    <div class="doc">
+      <div class="doc-main">
+        <div class="doc-title">${esc(d.name)}
+          ${Number(d.is_pinned) ? '<span class="pill pin">📌 fijado</span>' : ''}
+          ${Number(d.is_active) ? '' : '<span class="pill off">pausado</span>'}
+          <span class="pill">${esc(d.category || 'general')}</span>
+          ${Number(d.auto_refresh) ? '<span class="pill">🔄 auto</span>' : ''}
+        </div>
+        <div class="doc-prev">${esc(d.preview)}</div>
+        <div class="doc-meta">${Math.round((d.size || 0) / 100) / 10} KB · actualizado ${fmt(d.updated_at)}
+          ${d.source_url ? ` · <a href="${esc(d.source_url)}" target="_blank" rel="noopener noreferrer">${esc(d.source_url.slice(0, 60))}</a>` : ''}</div>
+      </div>
+      <div class="acts">
+        ${d.source_url ? `<button class="btn-icon-sm" title="Releer la URL" onclick="refreshDoc(${d.id}, this)">🔄</button>` : ''}
+        <button class="btn-icon-sm" title="Fijar / desfijar" onclick="patch(${d.id}, {is_pinned: ${Number(d.is_pinned) ? 0 : 1}})">📌</button>
+        <button class="btn-icon-sm" title="Pausar / activar" onclick="patch(${d.id}, {is_active: ${Number(d.is_active) ? 0 : 1}})">${Number(d.is_active) ? '⏸' : '▶️'}</button>
+        <button class="btn-icon-sm" title="Editar" onclick="openEdit(${d.id})">✏️</button>
+        <button class="btn-icon-sm" title="Eliminar" onclick="del(${d.id}, '${esc(d.name).replace(/'/g, '')}')">🗑</button>
+      </div>
+    </div>`).join('') : '<div class="empty">Todavía no hay nada cargado. Empezá con una nota rápida o una URL.</div>';
+}
+
+async function patch(id, body) { await run(null, async () => { await api('/' + id, { method: 'PUT', body }); load(); }); }
+async function del(id, name) { if (!confirm(`¿Eliminar "${name}"?`)) return; await run(null, async () => { await api('/' + id, { method: 'DELETE' }); toast('Eliminado'); load(); }); }
+async function refreshDoc(id, btn) {
+  await run(btn, async () => { const r = await api(`/${id}/refresh`, { method: 'POST', body: {} }); toast(r.changed ? '✅ Contenido actualizado' : 'Sin cambios en la página'); load(); });
+}
+async function openEdit(id) {
+  await run(null, async () => {
+    const d = await api('/' + id);
+    $('e-id').value = id; $('e-title').value = d.name; $('e-cat').value = d.category || ''; $('e-content').value = d.content;
+    $('e-pin').checked = !!Number(d.is_pinned); $('e-auto').checked = !!Number(d.auto_refresh);
+    $('edit-modal').style.display = 'flex';
+  });
+}
+function closeEdit() { $('edit-modal').style.display = 'none'; }
+async function saveEdit() {
+  await run(event.target, async () => {
+    await api('/' + $('e-id').value, { method: 'PUT', body: { title: $('e-title').value, category: $('e-cat').value, content: $('e-content').value, is_pinned: $('e-pin').checked, auto_refresh: $('e-auto').checked } });
+    closeEdit(); toast('✅ Guardado'); load();
+  });
+}
+load();
+</script>
+</body>
+</html>
