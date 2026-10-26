@@ -1905,9 +1905,18 @@ async function renderSettings() {
   const autoReply = await apiFetch('/auto-reply') || {};
   const isAdmin = S.me?.role === 'admin';
 
+  const TABS = [
+    ['whatsapp', 'WhatsApp'], ['conv', 'Conversaciones'], ['auto', 'Automatización'],
+    ...(isAdmin ? [['team', 'Equipo'], ['ai', 'Inteligencia artificial'], ['system', 'Sistema']] : []),
+  ];
+  if (!TABS.some(t => t[0] === S.settingsTab)) S.settingsTab = 'whatsapp';
+
   document.getElementById('settings-grid').innerHTML = `
+    <nav class="set-tabs" role="tablist" aria-label="Secciones de configuración">
+      ${TABS.map(([id, label]) => `<button class="set-tab" role="tab" id="set-tab-${id}" data-tab="${id}" aria-selected="${id === S.settingsTab}" onclick="showSettingsTab('${id}')">${label}</button>`).join('')}
+    </nav>
     <!-- WhatsApp -->
-    <div class="settings-card">
+    <div class="settings-card" data-sec="whatsapp">
       <h3>💬 WhatsApp</h3>
       <div id="wa-status-card" style="margin-bottom:12px;font-size:13px;color:var(--text2)">
         Hacé clic en el estado de conexión en la barra lateral para ver el QR.
@@ -1915,15 +1924,21 @@ async function renderSettings() {
       ${isAdmin ? `<button class="btn-danger btn-sm" onclick="waLogout()">⚠️ Cerrar sesión WA</button>` : ''}
     </div>
 
+    ${isAdmin ? `<div class="settings-card" data-sec="whatsapp" id="antiban-card">
+      <h3>🛡️ Envíos y protección anti-bloqueo</h3>
+      <div id="antiban-box" style="font-size:12px;color:var(--text3)">Cargando…</div>
+      <a href="/guia.html" target="_blank" rel="noopener" style="display:inline-block;margin-top:10px;font-size:12px;color:var(--primary)">Cómo funciona y cómo evitar problemas</a>
+    </div>` : ''}
+
     <!-- Quick Replies -->
-    <div class="settings-card">
+    <div class="settings-card" data-sec="conv">
       <h3>⚡ Respuestas rápidas</h3>
       <div id="qr-list-settings"></div>
       <button class="btn-secondary btn-sm" style="margin-top:8px" onclick="openQRModal()">+ Agregar</button>
     </div>
 
     <!-- File Library -->
-    <div class="settings-card">
+    <div class="settings-card" data-sec="conv">
       <h3>📎 Biblioteca de archivos</h3>
       <p style="font-size:12px;color:var(--text3);margin-bottom:12px">Archivos precargados para enviar desde los chats (PDF, imágenes, documentos).</p>
       <div id="files-settings-preview" style="margin-bottom:10px"></div>
@@ -1931,14 +1946,14 @@ async function renderSettings() {
     </div>
 
     <!-- Labels -->
-    <div class="settings-card">
+    <div class="settings-card" data-sec="conv">
       <h3>🏷️ Etiquetas</h3>
       <div id="labels-list-settings"></div>
       <button class="btn-secondary btn-sm" style="margin-top:8px" onclick="openLabelModal()">+ Crear etiqueta</button>
     </div>
 
     <!-- Auto Reply -->
-    <div class="settings-card full">
+    <div class="settings-card full" data-sec="auto">
       <h3>🤖 Auto-respuesta fuera de horario</h3>
       <div style="display:grid;grid-template-columns:auto 1fr 1fr 1fr;gap:12px;align-items:end;margin-bottom:14px">
         <div class="field">
@@ -1982,7 +1997,7 @@ async function renderSettings() {
 
     <!-- Users (solo admin) -->
     ${isAdmin ? `
-    <div class="settings-card full">
+    <div class="settings-card full" data-sec="team">
       <h3>👥 Agentes del equipo</h3>
       <div id="users-list-settings"></div>
       <button class="btn-secondary btn-sm" style="margin-top:10px" onclick="openUserModal()">+ Agregar agente</button>
@@ -1990,7 +2005,7 @@ async function renderSettings() {
 
     <!-- Agente IA (solo admin) -->
     ${isAdmin ? `
-    <div class="settings-card full" id="ai-config-card">
+    <div class="settings-card full" id="ai-config-card" data-sec="ai">
       <h3>🤖 Agente IA <span id="ai-status-pill" style="font-size:10px;padding:2px 8px;border-radius:10px;background:var(--surface2);color:var(--text3);font-weight:400;margin-left:8px">Cargando...</span></h3>
       <p style="font-size:12px;color:var(--text3);margin-bottom:14px">Respuestas automáticas inteligentes usando IA. Se activa fuera del horario laboral o cuando configurés.</p>
       <div id="ai-config-form">Cargando configuración...</div>
@@ -1998,10 +2013,17 @@ async function renderSettings() {
 
     <!-- Sistema (solo admin) -->
     ${isAdmin ? `
-    <div class="settings-card full" id="system-admin-card">
+    <div class="settings-card full" id="system-admin-card" data-sec="system">
       <h3>⚙️ Administración del sistema</h3>
       <p style="font-size:12px;color:var(--text3);margin-bottom:16px">Herramientas de mantenimiento. Todas las acciones requieren tu contraseña de acceso.</p>
       <div id="system-stats-box" style="margin-bottom:20px">Cargando estadísticas...</div>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin-bottom:20px">
+
+      <h4 style="margin-bottom:4px">💾 Respaldos de la base</h4>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:10px">Se crea uno automático cada día (se conservan los últimos 7). Quedan guardados en el servidor: <b>descargá copias y guardalas fuera de Railway</b>, porque si se pierde el volumen se pierden también. No incluyen la API key de la IA.</p>
+      <div style="margin-bottom:10px"><button class="btn-secondary" id="btn-backup-now" onclick="createBackupNow()">Crear respaldo ahora</button></div>
+      <div id="backups-list" style="font-size:12px;color:var(--text3)">Cargando…</div>
 
       <hr style="border:none;border-top:1px solid var(--border);margin-bottom:20px">
 
@@ -2081,7 +2103,71 @@ async function renderSettings() {
     renderUsersListSettings();
     loadAIConfig();
     loadSystemStats();
+    loadAntibanCard();
+    loadBackups();
   }
+  showSettingsTab(S.settingsTab);
+}
+
+function showSettingsTab(id) {
+  S.settingsTab = id;
+  document.querySelectorAll('#settings-grid .set-tab').forEach(b => b.setAttribute('aria-selected', b.dataset.tab === id));
+  document.querySelectorAll('#settings-grid .settings-card[data-sec]').forEach(c => { c.style.display = c.dataset.sec === id ? '' : 'none'; });
+}
+
+async function loadAntibanCard() {
+  const box = document.getElementById('antiban-box');
+  if (!box) return;
+  const a = await apiFetch('/integrations/antiban');
+  if (!a || a.error) { box.textContent = 'No se pudo cargar el estado.'; return; }
+  const n = (v) => Number(v || 0).toLocaleString('es-AR');
+  box.innerHTML = `
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+      <span class="ai-chip ${a.paused ? 'ai-p-urgent' : 'ai-p-ok'}">${a.paused ? 'Envíos en pausa' : 'Envíos activos'}</span>
+      ${a.quiet_hours_now ? '<span class="ai-chip ai-p-high">Horario silencioso</span>' : ''}
+      <span>Zona horaria: <b style="color:var(--text)">${esc(a.timezone)}</b> (son las ${a.local_hour}:00)</span>
+    </div>
+    ${a.paused ? `<p style="color:var(--red);margin:0 0 10px"><b>Motivo:</b> ${esc(a.paused_reason || '')}. <button class="btn-secondary btn-sm" onclick="resumeAntiban()">Reanudar envíos</button></p>` : ''}
+    <table style="width:100%;border-collapse:collapse">
+      <tr><td style="padding:3px 0">Contactos nuevos (última hora)</td><td style="text-align:right;color:var(--text)"><b>${n(a.cold.last_hour)}</b> / ${n(a.cold.hour_cap)}</td></tr>
+      <tr><td style="padding:3px 0">Contactos nuevos (24 h)</td><td style="text-align:right;color:var(--text)"><b>${n(a.cold.last_24h)}</b> / ${n(a.cold.day_cap_today)} <span title="Tope diario con calentamiento progresivo">(hoy)</span></td></tr>
+      <tr><td style="padding:3px 0">Conversaciones existentes (última hora)</td><td style="text-align:right;color:var(--text)"><b>${n(a.warm.last_hour)}</b> / ${n(a.warm.hour_cap)}</td></tr>
+      <tr><td style="padding:3px 0">Conversaciones existentes (24 h)</td><td style="text-align:right;color:var(--text)"><b>${n(a.warm.last_24h)}</b> / ${n(a.warm.day_cap)}</td></tr>
+    </table>`;
+}
+
+async function resumeAntiban() {
+  const r = await apiFetch('/integrations/antiban/resume', { method: 'POST' });
+  if (r?.ok) { notify('Envíos reanudados'); loadAntibanCard(); } else notify('No se pudo reanudar', 'error');
+}
+
+async function loadBackups() {
+  const box = document.getElementById('backups-list');
+  if (!box) return;
+  const r = await apiFetch('/system/backups');
+  if (!r?.ok) { box.textContent = 'No se pudieron cargar los respaldos.'; return; }
+  box.innerHTML = r.backups.length ? `<table style="width:100%;border-collapse:collapse">${r.backups.map(b => `
+    <tr style="border-top:1px solid var(--border)">
+      <td style="padding:8px 12px 8px 0;color:var(--text);word-break:break-all">${esc(b.name)}</td>
+      <td style="padding-right:12px;white-space:nowrap">${Math.max(1, Math.round(b.size / 1024)).toLocaleString('es-AR')} KB</td>
+      <td style="padding-right:12px">${new Date(b.created_at).toLocaleString('es-AR')}</td>
+      <td style="text-align:right;white-space:nowrap"><a class="btn-secondary btn-sm" href="/api/system/backups/${encodeURIComponent(b.name)}" download>Descargar</a>
+        <button class="btn-icon-sm" onclick="deleteBackupFile('${esc(b.name)}')" aria-label="Eliminar respaldo" title="Eliminar">🗑</button></td>
+    </tr>`).join('')}</table>` : 'Todavía no hay respaldos. El primero automático se crea esta noche.';
+}
+
+async function createBackupNow() {
+  const btn = document.getElementById('btn-backup-now');
+  if (btn) { btn.disabled = true; btn.textContent = 'Creando…'; }
+  const r = await apiFetch('/system/backups', { method: 'POST' });
+  if (btn) { btn.disabled = false; btn.textContent = 'Crear respaldo ahora'; }
+  if (r?.ok) { notify('Respaldo creado: ' + r.name); loadBackups(); } else notify(r?.error || 'Error creando el respaldo', 'error');
+}
+
+async function deleteBackupFile(name) {
+  if (!confirm('¿Eliminar el respaldo ' + name + '?')) return;
+  const r = await apiFetch('/system/backups/' + encodeURIComponent(name), { method: 'DELETE' });
+  if (r?.ok) loadBackups(); else notify('No se pudo eliminar', 'error');
 }
 
 function renderQRListSettings() {

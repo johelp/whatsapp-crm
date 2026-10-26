@@ -439,6 +439,7 @@ async function createTables() {
 // ─── SEED DATA ────────────────────────────────────────────────────────────────
 
 async function seedData() {
+  if (process.env.SKIP_SEED) return;   // restauración de un respaldo: no sembrar datos de ejemplo
   const existing = await queryOne('SELECT id FROM users LIMIT 1');
   if (existing) return;
 
@@ -547,7 +548,9 @@ async function runMigrations() {
     // SQLite no soporta IF NOT EXISTS en ADD COLUMN ni ALTER COLUMN TYPE: se intenta y se ignora el error
     if (!USE_PG && /ALTER COLUMN|CREATE TABLE/i.test(raw)) continue;
     const sql = USE_PG ? raw : raw.replace(/ADD COLUMN IF NOT EXISTS/i, 'ADD COLUMN').replace(/TIMESTAMPTZ/g, 'TEXT');
-    try { await query(sql); } catch(e) { if (USE_PG) console.log('Migration skip:', e.message.substring(0,60)); }
+    try {
+      if (USE_PG) await query(sql); else sqliteDb.run(sql);   // en SQLite, "columna duplicada" es lo esperado: sin ruido en el log
+    } catch(e) { if (USE_PG) console.log('Migration skip:', e.message.substring(0,60)); }
   }
   console.log('Migraciones aplicadas');
 }

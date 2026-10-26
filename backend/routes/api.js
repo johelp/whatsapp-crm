@@ -972,6 +972,22 @@ router.get('/ai/metrics', requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
+// ─── Respaldos de la base (solo admin) ───────────────────────────────────────
+router.get('/system/backups', requireAuth, requireAdmin, (req, res) => {
+  res.json({ ok: true, backups: require('../backup').listBackups() });
+});
+router.post('/system/backups', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json({ ok: true, ...(await require('../backup').createBackup()) }); }
+  catch (e) { res.status(500).json({ error: 'No se pudo crear el respaldo: ' + e.message }); }
+});
+router.get('/system/backups/:name', requireAuth, requireAdmin, (req, res) => {
+  const p = require('../backup').backupPath(req.params.name);
+  p ? res.download(p, req.params.name) : res.status(404).json({ error: 'Respaldo no encontrado' });
+});
+router.delete('/system/backups/:name', requireAuth, requireAdmin, (req, res) => {
+  require('../backup').deleteBackup(req.params.name) ? res.json({ ok: true }) : res.status(404).json({ error: 'Respaldo no encontrado' });
+});
+
 // Consumo de IA (persistente) y tope diario
 router.get('/ai/usage', requireAuth, requireAdmin, async (req, res) => {
   res.json({ ok: true, ...(await require('../ai-agent').getUsageSummary(req.query.days)) });

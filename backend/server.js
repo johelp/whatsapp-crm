@@ -221,6 +221,11 @@ cron.schedule('* * * * *', async () => {
   } catch (e) { /* silent */ }
 });
 
+// ─── Cron: respaldo diario de la base (03:30 hora del servidor) ───────────────
+cron.schedule('30 3 * * *', () => require('./backup').createBackup()
+  .then(r => console.log(`[backup] ${r.name} (${Math.round(r.size / 1024)} KB)`))
+  .catch(e => console.error('[backup] falló:', e.message)));
+
 // ─── Cron: refresco diario de URLs de la base de conocimiento ─────────────────
 cron.schedule('0 4 * * *', () => require('./knowledge').refreshDue().catch(e => console.error('[KB cron]', e.message)));
 

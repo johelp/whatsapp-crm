@@ -159,6 +159,11 @@ function htmlToText(html) {
 }
 
 async function extractFromUrl(rawUrl) {
+  try { return await _extractFromUrl(rawUrl); }
+  catch (e) { e.status = e.status || 400; throw e; }   // errores de la URL del usuario → 400, no 500
+}
+
+async function _extractFromUrl(rawUrl) {
   const { buffer, ctype, finalUrl } = await fetchRaw(rawUrl);
   let title = '', text = '';
   if (ctype.includes('pdf')) {

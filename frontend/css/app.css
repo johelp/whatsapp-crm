@@ -1923,3 +1923,9 @@ textarea.input { resize: vertical; line-height: 1.5; }
 
 .info-close { display: none; align-self: flex-end; font-size: 14px; }
 @media (max-width: 1100px) { .info-close { display: inline-flex; } }
+
+/* Configuración por secciones */
+.set-tabs { grid-column: 1 / -1; display: flex; gap: 6px; overflow-x: auto; border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 2px; scrollbar-width: thin; }
+.set-tab { flex: none; font: inherit; font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 99px; border: 1.5px solid var(--border); background: var(--surface); color: var(--text2); cursor: pointer; transition: background .15s, color .15s, border-color .15s, transform .15s; }
+.set-tab:hover { border-color: var(--text3); transform: translateY(-1px); }
+.set-tab[aria-selected="true"] { background: var(--wa-light); border-color: var(--wa-mid); color: var(--wa); }
