@@ -21,6 +21,21 @@ const knowledgeRoutes = require('./routes/knowledge');
 const { startWorkers } = require('./integrations');
 const normalizerRoutes = require('./routes/normalizer');
 
+// Un rechazo de promesa sin capturar (p.ej. consulta a la DB en un handler async) tumbaba el proceso entero → 502 en Railway
+process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', err?.message || err));
+process.on('uncaughtException', (err) => console.error('[uncaughtException]', err?.message || err));
+
+// Handlers async rechazados → next(err) (mismo mecanismo que express-async-errors, sin dependencia extra)
+const ExpressLayer = require('express/lib/router/layer');
+const _handleRequest = ExpressLayer.prototype.handle_request;
+ExpressLayer.prototype.handle_request = function (req, res, next) {
+  if (this.handle.length > 3) return next();
+  try {
+    const r = this.handle(req, res, next);
+    if (r && typeof r.catch === 'function') r.catch(next);
+  } catch (e) { next(e); }
+};
+
 const app = express();
 const httpServer = createServer(app);
 const IS_PROD = process.env.NODE_ENV === 'production';
@@ -98,6 +113,13 @@ app.use('/api/integrations', integrationRoutes);
 app.use('/api/knowledge', knowledgeRoutes);
 app.use('/api', apiRoutes);
 app.use('/api', normalizerRoutes);
+
+// Express 4 no captura rechazos de handlers async: respondemos 500 en vez de dejar la request colgada
+app.use((err, req, res, next) => {
+  console.error('[error]', req.method, req.path, err?.message || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Error interno (¿base de datos no disponible?)' });
+});
 
 // ─── Frontend (protegido) ─────────────────────────────────────────────────────
 
