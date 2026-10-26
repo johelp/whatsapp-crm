@@ -2476,6 +2476,20 @@ async function loadAIConfig() {
 
     <button class="btn-primary" onclick="saveAIConfig()" style="margin-bottom:16px">💾 Guardar configuración IA</button>
 
+    <!-- CONSUMO Y LÍMITES -->
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px">
+      <h4 style="margin:0 0 4px;font-size:13px">📈 Consumo y límite diario</h4>
+      <p style="font-size:12px;color:var(--text3);margin:0 0 10px">Tokens usados por la IA (respuestas, resúmenes, clasificación y limpieza de URLs). Si ponés un tope diario, al alcanzarlo la IA deja de responder hasta el día siguiente y la conversación queda para tu equipo.</p>
+      <div id="ai-usage-box" style="font-size:12px;color:var(--text3)">Cargando consumo…</div>
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
+        <div class="field" style="margin:0;min-width:200px">
+          <label for="ai-daily-cap">Tope diario de tokens (0 = sin tope)</label>
+          <input class="input" type="number" min="0" step="1000" id="ai-daily-cap" value="0">
+        </div>
+        <button class="btn-secondary" onclick="saveAILimits()">Guardar tope</button>
+      </div>
+    </div>
+
     <!-- PANEL DE TEST + MÉTRICAS (Agente v2) -->
     <div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:16px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
@@ -2517,7 +2531,36 @@ async function loadAIConfig() {
       <textarea class="input" id="ai-doc-text" rows="3" placeholder="Pegá aquí preguntas frecuentes, políticas, horarios, etc."></textarea>
       <button class="btn-secondary btn-sm" style="margin-top:6px" onclick="uploadAIDocumentText()">💾 Guardar texto</button>
     </div>
-  `;
+  `;  loadAIUsage();
+}
+
+async function loadAIUsage() {
+  const box = document.getElementById('ai-usage-box');
+  if (!box) return;
+  const u = await apiFetch('/ai/usage?days=30');
+  if (!u?.ok) { box.textContent = 'No se pudo cargar el consumo.'; return; }
+  const fmt = (n) => Number(n || 0).toLocaleString('es-AR');
+  const last7 = Object.entries(u.by_day).filter(([d]) => d >= new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10)).reduce((a, [, t]) => a + t, 0);
+  const cap = u.daily_token_cap;
+  const pct = cap > 0 ? Math.min(100, Math.round(u.today_tokens / cap * 100)) : 0;
+  const purposes = { reply: 'Respuestas', summary: 'Resúmenes', classify: 'Clasificación', knowledge: 'Limpieza de URLs' };
+  box.innerHTML = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px">
+      <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center"><div style="font-size:18px;font-weight:700;color:var(--text)">${fmt(u.today_tokens)}</div><div>Hoy</div></div>
+      <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center"><div style="font-size:18px;font-weight:700;color:var(--text)">${fmt(last7)}</div><div>Últimos 7 días</div></div>
+      <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center"><div style="font-size:18px;font-weight:700;color:var(--text)">${fmt(u.tokens)}</div><div>Últimos 30 días</div></div>
+      <div style="background:var(--surface);border-radius:8px;padding:8px;text-align:center"><div style="font-size:18px;font-weight:700;color:${u.errors ? 'var(--red)' : 'var(--text)'}">${fmt(u.calls)}</div><div>Llamadas · ${fmt(u.errors)} con error</div></div>
+    </div>
+    ${cap > 0 ? `<div style="margin-top:10px"><div style="height:8px;border-radius:99px;background:var(--border);overflow:hidden"><div style="height:100%;width:${pct}%;background:${u.cap_reached ? 'var(--red)' : 'var(--wa)'}"></div></div><div style="margin-top:4px">${fmt(u.today_tokens)} de ${fmt(cap)} tokens hoy${u.cap_reached ? ' — <b style="color:var(--red)">tope alcanzado: la IA está en pausa hasta mañana</b>' : ''}</div></div>` : ''}
+    <div style="margin-top:8px">${Object.entries(u.by_purpose).map(([k, v]) => `${purposes[k] || k}: <b style="color:var(--text)">${fmt(v.tokens)}</b>`).join(' · ') || 'Todavía no hay consumo registrado.'}</div>`;
+  const inp = document.getElementById('ai-daily-cap'); if (inp) inp.value = cap || 0;
+}
+
+async function saveAILimits() {
+  const v = parseInt(document.getElementById('ai-daily-cap')?.value, 10) || 0;
+  const r = await apiFetch('/ai/limits', { method: 'PUT', body: JSON.stringify({ daily_token_cap: v }) });
+  if (r?.ok) { notify(v > 0 ? 'Tope diario guardado' : 'Tope diario desactivado'); loadAIUsage(); }
+  else notify(r?.error || 'Error guardando el tope', 'error');
 }
 
 function renderAIDocsList(docs) {

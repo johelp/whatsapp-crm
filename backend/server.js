@@ -133,9 +133,21 @@ function requireAuth(req, res, next) {
 
 // Raíz pública: visitantes ven la landing (con botón "Iniciar sesión" → /login); con sesión activa entran al panel
 app.use('/img', express.static(path.join(__dirname, '../landing/img'), { maxAge: '7d' }));
+// PUBLIC_LANDING=false en las instalaciones de clientes: la raíz lleva directo al login (la landing es solo de la instancia comercial)
+const LANDING_ON = !/^(0|false|off|no)$/i.test(process.env.PUBLIC_LANDING || 'true');
 app.get('/', (req, res) => {
-  const file = req.session?.user ? '../frontend/index.html' : '../landing/index.html';
-  res.sendFile(path.join(__dirname, file));
+  if (req.session?.user) return res.sendFile(path.join(__dirname, '../frontend/index.html'));
+  if (!LANDING_ON) return res.redirect('/login');
+  res.sendFile(path.join(__dirname, '../landing/index.html'));
+});
+
+// Salud para monitores externos: 200 si la app y la base responden; ?strict=1 exige además WhatsApp conectado
+app.get('/health', async (req, res) => {
+  let db = false;
+  try { await Promise.race([query('SELECT 1 AS ok'), new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))]); db = true; } catch (e) {}
+  const wa = getStatus().status;
+  const ok = db && (req.query.strict !== '1' || wa === 'connected');
+  res.status(ok ? 200 : 503).json({ status: ok ? 'ok' : 'degraded', db, whatsapp: wa, uptime_s: Math.round(process.uptime()), version: require('../package.json').version });
 });
 
 app.use(requireAuth, express.static(path.join(__dirname, '../frontend')));
@@ -241,6 +253,7 @@ async function start() {
 
   setIO(io);
   setSenderIO(io);
+  require('./tz').startTZRefresh();
   await startWorkers().catch(e => console.error('Error iniciando workers:', e.message));
 
   // 3. Conectar Baileys en background

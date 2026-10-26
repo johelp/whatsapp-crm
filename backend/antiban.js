@@ -32,7 +32,7 @@ const DEFAULTS = {
   duplicate_window_s: 60,
 };
 
-const TZ = process.env.APP_TZ || 'America/Argentina/Buenos_Aires';
+const { getTZ } = require('./tz');
 const RATE_RE = /rate-overlimit|too many|429|forbidden|403|not-authorized|spam|blocked|restrict/i;
 
 let cfgCache = null, cfgAt = 0;
@@ -83,7 +83,7 @@ const num = (v) => Number(v) || 0;
 
 function localHour() {
   try {
-    return Number(new Intl.DateTimeFormat('en-GB', { hour: 'numeric', hour12: false, timeZone: TZ }).format(new Date())) % 24;
+    return Number(new Intl.DateTimeFormat('en-GB', { hour: 'numeric', hour12: false, timeZone: getTZ() }).format(new Date())) % 24;
   } catch (e) { return new Date().getHours(); }
 }
 
@@ -177,7 +177,7 @@ async function _gate(meta, fn) {
   const { jid, text = '', kind = 'manual' } = meta;
 
   if (Date.now() < pausedUntil) {
-    throw new GateError('PAUSED', `Envíos pausados por protección anti-baneo (${pausedReason}). Reanudan ${new Date(pausedUntil).toLocaleTimeString('es-AR', { timeZone: TZ })}`, pausedUntil);
+    throw new GateError('PAUSED', `Envíos pausados por protección anti-baneo (${pausedReason}). Reanudan ${new Date(pausedUntil).toLocaleTimeString('es-AR', { timeZone: getTZ() })}`, pausedUntil);
   }
 
   // Duplicados
@@ -258,7 +258,7 @@ async function getStatus() {
     paused_reason: pausedReason || null,
     quiet_hours_now: inQuietHours(cfg),
     local_hour: localHour(),
-    timezone: TZ,
+    timezone: getTZ(),
     cold: {
       last_hour: await countSince(true, Date.now() - 3600000),
       hour_cap: cfg.cold_per_hour,
@@ -282,7 +282,7 @@ async function pruneLog() {
 /** Día (1-7, lunes=1) y minutos desde medianoche en la zona horaria del negocio */
 function localNow() {
   try {
-    const parts = new Intl.DateTimeFormat('en-GB', { weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false, timeZone: TZ }).formatToParts(new Date());
+    const parts = new Intl.DateTimeFormat('en-GB', { weekday: 'short', hour: 'numeric', minute: 'numeric', hour12: false, timeZone: getTZ() }).formatToParts(new Date());
     const get = (t) => parts.find(p => p.type === t)?.value;
     const day = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[get('weekday')];
     return { day, minutes: (Number(get('hour')) % 24) * 60 + Number(get('minute')) };

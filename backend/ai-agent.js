@@ -21,6 +21,8 @@ let _promptCache   = null;
 let _promptCacheAt = 0;
 const PROMPT_CACHE_TTL = 5 * 60 * 1000;
 
+let _capNotifiedDay = null;
+
 // ─── Cola por JID ─────────────────────────────────────────────────────────────
 const _jidState = new Map();
 
@@ -148,7 +150,8 @@ async function maybeUpdateSummary(jid, config) {
     const result = await callProvider(
       config,
       [{ role: 'user', content: `Resume en máximo 2 oraciones qué quiere el cliente:\n\n${conv}` }],
-      'Sos un asistente que resume conversaciones de WhatsApp de forma muy concisa.'
+      'Sos un asistente que resume conversaciones de WhatsApp de forma muy concisa.',
+      'summary'
     );
     const summary = typeof result === 'string' ? result : result?.text;
     if (summary) {
@@ -262,15 +265,82 @@ async function callAnthropic(config, messages, systemPrompt) {
   };
 }
 
-async function callProvider(config, messages, systemPrompt) {
-  if (!config.api_key) throw new Error('API key no configurada');
-  switch (config.provider) {
-    case 'gemini':    return callGemini(config, messages, systemPrompt);
-    case 'groq':      return callGroq(config, messages, systemPrompt);
-    case 'openai':    return callOpenAI(config, messages, systemPrompt);
-    case 'anthropic': return callAnthropic(config, messages, systemPrompt);
-    default: throw new Error(`Proveedor desconocido: ${config.provider}`);
+// ─── Consumo persistente ──────────────────────────────────────────────────────
+// purpose: 'reply' (respuestas), 'summary', 'classify', 'knowledge' (limpieza de URLs)
+
+function todayKey() {
+  try { return new Intl.DateTimeFormat('en-CA', { timeZone: require('./tz').getTZ() }).format(new Date()); }
+  catch (e) { return new Date().toISOString().slice(0, 10); }
+}
+
+async function recordUsage(purpose, provider, model, tokens, isError = false) {
+  try {
+    const day = todayKey();
+    const row = await queryOne('SELECT id FROM ai_usage WHERE day = ? AND purpose = ? AND provider = ? AND model = ?', [day, purpose, provider || '', model || '']);
+    if (row) await query('UPDATE ai_usage SET calls = calls + 1, tokens = tokens + ?, errors = errors + ? WHERE id = ?', [tokens || 0, isError ? 1 : 0, row.id]);
+    else await query('INSERT INTO ai_usage (day, purpose, provider, model, calls, tokens, errors) VALUES (?, ?, ?, ?, 1, ?, ?)', [day, purpose, provider || '', model || '', tokens || 0, isError ? 1 : 0]);
+  } catch (e) { console.error('[AI usage]', e.message); }
+}
+
+async function getTokensToday() {
+  const r = await queryOne('SELECT COALESCE(SUM(tokens), 0) AS t FROM ai_usage WHERE day = ?', [todayKey()]);
+  return Number(r?.t) || 0;
+}
+
+async function getLimits() {
+  let l = {};
+  try { const r = await queryOne("SELECT value FROM settings WHERE key = 'ai_limits'"); if (r?.value) l = JSON.parse(r.value); } catch (e) {}
+  return { daily_token_cap: Number(l.daily_token_cap) || 0 };
+}
+
+async function saveLimits(patch) {
+  const next = { ...(await getLimits()) };
+  if (patch.daily_token_cap !== undefined) next.daily_token_cap = Math.max(0, Math.floor(Number(patch.daily_token_cap) || 0));
+  const json = JSON.stringify(next);
+  const ex = await queryOne("SELECT key FROM settings WHERE key = 'ai_limits'");
+  if (ex) await query("UPDATE settings SET value = ? WHERE key = 'ai_limits'", [json]);
+  else await query("INSERT INTO settings (key, value) VALUES ('ai_limits', ?)", [json]);
+  return next;
+}
+
+async function getUsageSummary(days = 30) {
+  days = Math.min(Math.max(parseInt(days, 10) || 30, 1), 365);
+  const tz = require('./tz').getTZ();
+  const sinceKey = new Intl.DateTimeFormat('en-CA', { timeZone: tz }).format(new Date(Date.now() - (days - 1) * 86400000));
+  const rows = await query('SELECT day, purpose, provider, model, calls, tokens, errors FROM ai_usage WHERE day >= ? ORDER BY day', [sinceKey]);
+  const num = (v) => Number(v) || 0;
+  const byDay = {}, byPurpose = {}, byModel = {};
+  let calls = 0, tokens = 0, errors = 0;
+  for (const r of rows) {
+    const t = num(r.tokens), c = num(r.calls), e = num(r.errors);
+    calls += c; tokens += t; errors += e;
+    byDay[r.day] = (byDay[r.day] || 0) + t;
+    byPurpose[r.purpose] = byPurpose[r.purpose] || { calls: 0, tokens: 0 }; byPurpose[r.purpose].calls += c; byPurpose[r.purpose].tokens += t;
+    const mk = `${r.provider}/${r.model}`; byModel[mk] = byModel[mk] || { calls: 0, tokens: 0 }; byModel[mk].calls += c; byModel[mk].tokens += t;
   }
+  const limits = await getLimits();
+  const today = byDay[todayKey()] || 0;
+  return { days, calls, tokens, errors, today_tokens: today, by_day: byDay, by_purpose: byPurpose, by_model: byModel,
+           daily_token_cap: limits.daily_token_cap, cap_reached: limits.daily_token_cap > 0 && today >= limits.daily_token_cap };
+}
+
+async function callProvider(config, messages, systemPrompt, purpose = 'reply') {
+  if (!config.api_key) throw new Error('API key no configurada');
+  let result;
+  try {
+    switch (config.provider) {
+      case 'gemini':    result = await callGemini(config, messages, systemPrompt); break;
+      case 'groq':      result = await callGroq(config, messages, systemPrompt); break;
+      case 'openai':    result = await callOpenAI(config, messages, systemPrompt); break;
+      case 'anthropic': result = await callAnthropic(config, messages, systemPrompt); break;
+      default: throw new Error(`Proveedor desconocido: ${config.provider}`);
+    }
+  } catch (e) {
+    await recordUsage(purpose, config.provider, config.model, 0, true);
+    throw e;
+  }
+  await recordUsage(purpose, config.provider, config.model, result?.tokensUsed || 0);
+  return result;
 }
 
 // ─── Motor interno (corre dentro de la cola por JID) ─────────────────────────
@@ -295,6 +365,16 @@ async function _processForJid(jid, text, config, sendMessageFn) {
       return true;
     }
 
+    // Tope diario de tokens: si se alcanzó, la IA no responde y la conversación queda para los operadores
+    const limits = await getLimits();
+    if (limits.daily_token_cap > 0 && await getTokensToday() >= limits.daily_token_cap) {
+      if (_capNotifiedDay !== todayKey()) {
+        _capNotifiedDay = todayKey();
+        console.warn(`[AI] Tope diario de tokens alcanzado (${limits.daily_token_cap}). La IA deja de responder hasta mañana.`);
+        require('./bus').emitEvent('ai.limit_reached', { daily_token_cap: limits.daily_token_cap });
+      }
+      return false;
+    }
     const messages     = await getConversationMemory(jid);
     // Conocimiento relevante al mensaje actual + los 2 anteriores del cliente (el prompt base queda cacheado)
     const recentUser   = messages.filter(m => m.role === 'user').slice(-3).map(m => m.content).join(' ');
@@ -429,6 +509,7 @@ module.exports = {
   runAIAgent,
   getDocumentContext,
   callProvider,
+  getUsageSummary, getLimits, saveLimits, getTokensToday,
   getAIConfig,
   buildSystemPrompt,
   getMetrics,

@@ -799,6 +799,7 @@ router.put('/auto-reply', requireAuth, async (req, res) => {
       'UPDATE auto_reply_config SET is_active=?, schedule_start=?, schedule_end=?, working_days=?, greeting_message=?, collect_fields=?, timezone=COALESCE(?,timezone), updated_at=NOW() WHERE id=1',
       [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, fields, timezone || null]
     );
+    require('../tz').refreshTZ();
   } else {
     await query(
       'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields, timezone) VALUES (?,?,?,?,?,?,?)',
@@ -969,6 +970,14 @@ router.get('/ai/metrics', requireAuth, requireAdmin, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// Consumo de IA (persistente) y tope diario
+router.get('/ai/usage', requireAuth, requireAdmin, async (req, res) => {
+  res.json({ ok: true, ...(await require('../ai-agent').getUsageSummary(req.query.days)) });
+});
+router.put('/ai/limits', requireAuth, requireAdmin, async (req, res) => {
+  res.json({ ok: true, ...(await require('../ai-agent').saveLimits(req.body || {})) });
 });
 
 // Invalidar cache del system prompt (útil después de actualizar config/documentos)

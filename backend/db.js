@@ -338,6 +338,16 @@ async function createTables() {
       created_at BIGINT,
       updated_at BIGINT
     )`,
+    `CREATE TABLE IF NOT EXISTS ai_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      day TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      provider TEXT,
+      model TEXT,
+      calls INTEGER DEFAULT 0,
+      tokens INTEGER DEFAULT 0,
+      errors INTEGER DEFAULT 0
+    )`,
     // ── Anti-ban e integraciones (tiempos como epoch ms BIGINT: portables SQLite/PG) ──
     `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,

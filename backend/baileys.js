@@ -13,6 +13,27 @@ const aiFeatures = require('./ai-features');
 const { emitEvent } = require('./bus');
 
 // Mensajes de baja ("STOP", "BAJA"...) → lista de bloqueo
+// Historial al vincular: solo los últimos N días y hasta M mensajes por chat (0 días = no importar historial).
+// Evita llenar la base (el volumen anterior se llenó por importar todo el historial).
+const envInt = (name, def) => { const v = parseInt(process.env[name], 10); return Number.isFinite(v) && v >= 0 ? v : def; };
+const HISTORY_DAYS = envInt('HISTORY_DAYS', 30);
+const HISTORY_MAX_PER_CHAT = envInt('HISTORY_MAX_PER_CHAT', 200);
+const msgTs = (m) => Number(m.messageTimestamp?.low ?? m.messageTimestamp ?? 0) * 1000;
+
+function limitHistory(msgs) {
+  if (HISTORY_DAYS === 0) return [];
+  const cutoff = Date.now() - HISTORY_DAYS * 86400000;
+  const perChat = new Map();
+  const kept = [];
+  for (const m of [...msgs].sort((a, b) => msgTs(b) - msgTs(a))) {   // más nuevos primero
+    const jid = m.key?.remoteJid; if (!jid || msgTs(m) < cutoff) continue;
+    const n = perChat.get(jid) || 0;
+    if (n >= HISTORY_MAX_PER_CHAT) continue;
+    perChat.set(jid, n + 1); kept.push(m);
+  }
+  return kept.reverse();   // se importan en orden cronológico
+}
+
 const OPT_OUT_RE = /^\s*(stop|baja|unsubscribe|no molestar|no me escriban?|cancelar suscripci[oó]n|dejar de recibir)\s*[.!]*\s*$/i;
 
 let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, getContentType, downloadMediaMessage;
@@ -134,7 +155,7 @@ function getMessageText(msg) {
 
 function isBusinessHours(config) {
   if (!config?.is_active) return true;
-  const tz = config.timezone || 'Europe/Madrid';
+  const tz = require('./tz').getTZ();   // fuente única: APP_TZ > Configuración > Europe/Madrid
   const now = new Date();
   const parts = now.toLocaleString('en-US', { timeZone: tz, hour12: false }).split(', ');
   const timePart = parts[1] || '00:00:00';
@@ -419,6 +440,7 @@ async function processMessage(msg) {
 
 async function processHistoryMessage(msg) {
   if (!msg.message || !msg.key?.remoteJid) return;
+  if (HISTORY_DAYS === 0 || msgTs(msg) < Date.now() - HISTORY_DAYS * 86400000) return;
   const rawJid = msg.key.remoteJid;
   if (rawJid.includes('broadcast')) return;
   const { type, text, mediaData } = getMessageText(msg);
@@ -508,7 +530,7 @@ async function connect() {
     printQRInTerminal: false,
     browser: ['Chrome (Linux)', 'Chrome', '121.0.6167.160'],
     generateHighQualityLinkPreview: false,
-    syncFullHistory: true,
+    syncFullHistory: HISTORY_DAYS > 0,   // si no se quiere historial, ni siquiera se descarga
     markOnlineOnConnect: false,
   });
 
@@ -638,7 +660,9 @@ async function connect() {
     let imported = 0;
     let errors = 0;
 
-    for (const msg of msgs) {
+    const batch = limitHistory(msgs);
+    console.log(`[Historial] Tope aplicado: ${batch.length} de ${msgs.length} mensajes (últimos ${HISTORY_DAYS} días, máx ${HISTORY_MAX_PER_CHAT} por chat)`);
+    for (const msg of batch) {
       try {
         if (!msg.message || !msg.key?.remoteJid) continue;
         const rawJid = msg.key.remoteJid;
@@ -985,4 +1009,4 @@ async function fullResetAuth() {
   return true;
 }
 
-module.exports = { connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };
+module.exports = { limitHistory, connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };

@@ -189,7 +189,7 @@ Reglas: mantené cifras, precios, fechas y nombres EXACTOS como figuran; usá vi
 
 CONTENIDO:
 ${text.slice(0, 14000)}`;
-  const out = await callProvider({ ...ai, max_tokens: 1800, temperature: 0.1 }, [{ role: 'user', content: prompt }], system);
+  const out = await callProvider({ ...ai, max_tokens: 1800, temperature: 0.1 }, [{ role: 'user', content: prompt }], system, 'knowledge');
   const cleaned = (typeof out === 'string' ? out : out?.text || '').trim();
   if (cleaned.length < 50) throw new Error('La IA no devolvió contenido útil');
   return cleaned;

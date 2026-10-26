@@ -140,7 +140,7 @@ Devolvé JSON con esta forma exacta:
 {"labels":["..."],"intent":"frase corta de qué quiere el cliente","priority":"low|normal|high|urgent","sentiment":"positive|neutral|negative","language":"código ISO 639-1","needs_human":true|false}`;
 
     const { callProvider } = require('./ai-agent');
-    const out = await callProvider({ ...ai, max_tokens: 250, temperature: 0.1 }, [{ role: 'user', content: prompt }], system);
+    const out = await callProvider({ ...ai, max_tokens: 250, temperature: 0.1 }, [{ role: 'user', content: prompt }], system, 'classify');
     const raw = (typeof out === 'string' ? out : out?.text) || '';
     const m = raw.match(/\{[\s\S]*\}/);
     if (!m) throw new Error('respuesta sin JSON');
