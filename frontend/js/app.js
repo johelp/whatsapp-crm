@@ -148,7 +148,37 @@ socket.on('wa:qr', ({ qr }) => {
   if (subtitle) subtitle.textContent = 'Abrí WhatsApp → Dispositivos vinculados → Vincular dispositivo';
   // Actualizar estado y abrir modal
   updateWAStatus('qr');
-  openModal('modal-qr');
+  // Abrir el modal solo la primera vez por sesión: antes reaparecía en cada recarga y tapaba toda la app
+  // (se puede reabrir desde el botón "Escanear QR" o Configuración)
+  let seen = false;
+  try { seen = sessionStorage.getItem('qr_modal_shown') === '1'; sessionStorage.setItem('qr_modal_shown', '1'); } catch (e) {}
+  if (!seen) openModal('modal-qr');
+});
+
+
+// ─── Clasificación IA (prioridad / sentimiento / intención) ───────────────────
+const AI_PRIORITY = { urgent: ['Urgente', 'ai-p-urgent'], high: ['Alta', 'ai-p-high'] };
+const AI_SENTIMENT = { negative: 'Molesto', positive: 'Contento' };
+function aiChip(c) {
+  const p = AI_PRIORITY[c.ai_priority];
+  if (!p && c.ai_sentiment !== 'negative') return '';
+  const parts = [];
+  if (p) parts.push(`<span class="ai-chip ${p[1]}" title="Prioridad ${p[0].toLowerCase()} (IA)">${p[0]}</span>`);
+  if (c.ai_sentiment === 'negative') parts.push('<span class="ai-chip ai-p-high" title="Cliente molesto (IA)">Molesto</span>');
+  return parts.join('');
+}
+function aiDetail(c) {
+  if (!c || (!c.ai_intent && !c.ai_priority)) return '';
+  const bits = [];
+  if (c.ai_intent) bits.push(`<span class="ai-intent" title="Intención detectada por IA">${esc(c.ai_intent)}</span>`);
+  const p = AI_PRIORITY[c.ai_priority]; if (p) bits.push(`<span class="ai-chip ${p[1]}">Prioridad ${p[0].toLowerCase()}</span>`);
+  if (AI_SENTIMENT[c.ai_sentiment]) bits.push(`<span class="ai-chip ${c.ai_sentiment === 'negative' ? 'ai-p-high' : 'ai-p-ok'}">${AI_SENTIMENT[c.ai_sentiment]}</span>`);
+  return bits.join('');
+}
+
+socket.on('conversation:updated', () => { if (typeof loadConversations === 'function') loadConversations(); });
+socket.on('conversation:alert', (d) => {
+  if (d.name === 'conversation.needs_human') notify('Un cliente necesita atención humana', 'info');
 });
 
 socket.on('message:new', async (data) => {
@@ -556,6 +586,7 @@ function renderConversationList() {
         <div class="chat-preview">${esc(cleanPreview(c.last_message))}</div>
         <div class="chat-footer">
           ${labels}
+          ${aiChip(c)}
           ${assignedChip}
           ${c.unread_count > 0 ? `<span class="unread-badge">${c.unread_count}</span>` : ''}
         </div>
@@ -599,6 +630,7 @@ async function openChat(jid) {
 
   S.activeJid = jid;
   prevActiveJid = jid;
+  loadNotes(jid);
 
   // Mostrar panel activo
   document.getElementById('chat-empty').style.display = 'none';
@@ -630,6 +662,8 @@ async function openChat(jid) {
   }
   document.getElementById('ch-name').textContent = displayName;
   document.getElementById('ch-phone').textContent = isGroup ? `${jid}` : `+${phone}`;
+  const aiBox = document.getElementById('ch-ai');
+  if (aiBox) aiBox.innerHTML = aiDetail(conv);
   document.getElementById('ch-company').textContent = isGroup ? '👥 Grupo de WhatsApp' : (conv?.company ? `· ${conv.company}` : '');
 
   // Status y asignación
@@ -865,6 +899,86 @@ function appendMessage(msg) {
   el.appendChild(wrap);
   el.scrollTop = el.scrollHeight;
 }
+
+// ═══════════════════════════════════════════════════════
+// NOTAS INTERNAS POR CLIENTE
+// ═══════════════════════════════════════════════════════
+
+S.notes = [];
+const fmtNoteDate = (t) => new Date(Number(t)).toLocaleString('es-AR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+async function loadNotes(jid) {
+  const notes = await apiFetch(`/conversations/${encodeURIComponent(jid)}/notes`).catch(() => null);
+  if (jid !== S.activeJid) return;   // el operador ya cambió de chat
+  S.notes = Array.isArray(notes) ? notes : [];
+  renderNotes();
+}
+
+function renderNotes() {
+  const list = document.getElementById('notes-list');
+  const pinnedBox = document.getElementById('pinned-notes');
+  const count = document.getElementById('notes-count');
+  const badge = document.getElementById('notes-badge');
+  if (!list) return;
+  const me = S.me?.id;
+  const isAdmin = S.me?.role === 'admin';
+  count.textContent = S.notes.length ? `(${S.notes.length})` : '';
+  badge.textContent = S.notes.length; badge.style.display = S.notes.length ? 'flex' : 'none';
+
+  list.innerHTML = S.notes.length ? S.notes.map(n => `
+    <article class="note ${n.pinned ? 'pinned' : ''}">
+      <p class="note-text">${esc(n.text)}</p>
+      <footer class="note-meta">
+        <span class="note-author" style="color:${esc(n.author_color || 'inherit')}">${esc(n.author_name || 'Sistema')}</span>
+        <span>· ${fmtNoteDate(n.created_at)}</span>
+        <span class="note-actions">
+          <button class="btn-icon-sm" onclick="toggleNotePin(${n.id}, ${n.pinned ? 0 : 1})" title="${n.pinned ? 'Desfijar' : 'Fijar'}" aria-label="${n.pinned ? 'Desfijar nota' : 'Fijar nota'}" aria-pressed="${n.pinned ? 'true' : 'false'}">📌</button>
+          ${(n.user_id === me || isAdmin) ? `<button class="btn-icon-sm" onclick="editNote(${n.id})" title="Editar" aria-label="Editar nota">✏️</button><button class="btn-icon-sm" onclick="deleteNote(${n.id})" title="Eliminar" aria-label="Eliminar nota">🗑</button>` : ''}
+        </span>
+      </footer>
+    </article>`).join('') : '<p class="notes-empty">Sin notas. Anotá acá lo que el próximo operador deba saber de este cliente.</p>';
+
+  const pinned = S.notes.filter(n => n.pinned);
+  pinnedBox.innerHTML = pinned.map(n => `<div class="pinned-note"><span aria-hidden="true">📌</span> <span>${esc(n.text)}</span> <small>— ${esc(n.author_name || '')}</small></div>`).join('');
+  pinnedBox.style.display = pinned.length ? 'block' : 'none';
+}
+
+async function addNote() {
+  if (!S.activeJid) return;
+  const input = document.getElementById('note-input');
+  const text = input.value.trim();
+  if (!text) return;
+  const pinned = document.getElementById('note-pin').checked;
+  const r = await apiFetch(`/conversations/${encodeURIComponent(S.activeJid)}/notes`, { method: 'POST', body: JSON.stringify({ text, pinned }) });
+  if (r?.ok) { input.value = ''; document.getElementById('note-pin').checked = false; notify('Nota guardada'); loadNotes(S.activeJid); }
+}
+
+async function toggleNotePin(id, pinned) {
+  await apiFetch(`/notes/${id}`, { method: 'PUT', body: JSON.stringify({ pinned }) });
+  loadNotes(S.activeJid);
+}
+
+async function editNote(id) {
+  const n = S.notes.find(x => x.id === id); if (!n) return;
+  const text = prompt('Editar nota', n.text);
+  if (text === null || !text.trim()) return;
+  await apiFetch(`/notes/${id}`, { method: 'PUT', body: JSON.stringify({ text }) });
+  loadNotes(S.activeJid);
+}
+
+async function deleteNote(id) {
+  if (!confirm('¿Eliminar esta nota?')) return;
+  await apiFetch(`/notes/${id}`, { method: 'DELETE' });
+  loadNotes(S.activeJid);
+}
+
+// Otro operador agregó/cambió una nota en el chat que tengo abierto
+socket.on('note:changed', (d) => { if (d.jid === S.activeJid) loadNotes(d.jid); loadConversations(); });
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && window.innerWidth <= 1100 && document.getElementById('info-sidebar')?.classList.contains('open')) toggleInfoSidebar();
+  if (e.target?.id === 'note-input' && e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); addNote(); }
+});
 
 function toggleInfoSidebar() {
   const sb = document.getElementById('info-sidebar');

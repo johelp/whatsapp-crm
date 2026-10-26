@@ -141,6 +141,7 @@ require('./online').setMap(onlineUsers);
 // Cambios hechos por la IA/automatizaciones → refrescar la UI de los agentes
 require('./bus').bus.on('event', (name, data) => {
   if (name === 'conversation.updated') io.emit('conversation:updated', data);
+  if (name === 'note.changed') io.emit('note:changed', data);
   if (['conversation.assigned', 'conversation.needs_human'].includes(name)) io.emit('conversation:alert', { name, ...data });
 });
 

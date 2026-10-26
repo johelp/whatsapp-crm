@@ -313,6 +313,7 @@ router.get('/conversations', requireAuth, async (req, res) => {
       END as contact_phone,
       c.name as contact_saved_name,
       c.company as company,
+      (SELECT COUNT(*) FROM conversation_notes cn WHERE cn.jid = cv.jid) as notes_count,
       u.display_name as assigned_name, u.color as assigned_color
     FROM conversations cv
     LEFT JOIN contacts c ON cv.contact_id = c.id
@@ -393,6 +394,55 @@ router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {
   res.json(msgs.map(m => ({ ...m, timestamp: Number(m.timestamp) || 0 })));
 });
 
+// ─── Notas internas por cliente (las ven todos los operadores, el cliente nunca) ─
+const noteSelect = `SELECT n.id, n.jid, n.text, n.pinned, n.created_at, n.updated_at, n.user_id,
+    u.display_name AS author_name, u.color AS author_color
+  FROM conversation_notes n LEFT JOIN users u ON n.user_id = u.id`;
+
+router.get('/conversations/:jid/notes', requireAuth, async (req, res) => {
+  const rows = await query(`${noteSelect} WHERE n.jid = ? ORDER BY n.pinned DESC, n.created_at DESC LIMIT 200`, [decodeURIComponent(req.params.jid)]);
+  res.json(rows.map(r => ({ ...r, created_at: Number(r.created_at), updated_at: Number(r.updated_at) })));
+});
+
+router.post('/conversations/:jid/notes', requireAuth, async (req, res) => {
+  const jid = decodeURIComponent(req.params.jid);
+  const text = String(req.body.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'La nota está vacía' });
+  if (text.length > 2000) return res.status(400).json({ error: 'Máximo 2000 caracteres' });
+  const now = Date.now();
+  const rows = await query('INSERT INTO conversation_notes (jid, user_id, text, pinned, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
+    [jid, req.session.user.id, text, req.body.pinned ? 1 : 0, now, now]);
+  require('../bus').emitEvent('note.changed', { jid, action: 'added', note_id: rows[0]?.id, by: req.session.user.display_name });
+  res.json({ ok: true, id: rows[0]?.id });
+});
+
+async function ownNote(req, res) {
+  const n = await queryOne('SELECT * FROM conversation_notes WHERE id = ?', [req.params.id]);
+  if (!n) { res.status(404).json({ error: 'No encontrada' }); return null; }
+  return n;
+}
+
+router.put('/notes/:id', requireAuth, async (req, res) => {
+  const n = await ownNote(req, res); if (!n) return;
+  const isOwner = n.user_id === req.session.user.id || req.session.user.role === 'admin';
+  // Fijar/desfijar lo puede hacer cualquier operador; editar el texto solo el autor o un admin
+  if (req.body.text !== undefined && !isOwner) return res.status(403).json({ error: 'Solo el autor puede editar la nota' });
+  const text = req.body.text !== undefined ? String(req.body.text).trim().slice(0, 2000) : n.text;
+  if (!text) return res.status(400).json({ error: 'La nota está vacía' });
+  const pinned = req.body.pinned !== undefined ? (req.body.pinned ? 1 : 0) : n.pinned;
+  await query('UPDATE conversation_notes SET text = ?, pinned = ?, updated_at = ? WHERE id = ?', [text, pinned, Date.now(), n.id]);
+  require('../bus').emitEvent('note.changed', { jid: n.jid, action: 'updated', note_id: n.id, by: req.session.user.display_name });
+  res.json({ ok: true });
+});
+
+router.delete('/notes/:id', requireAuth, async (req, res) => {
+  const n = await ownNote(req, res); if (!n) return;
+  if (n.user_id !== req.session.user.id && req.session.user.role !== 'admin') return res.status(403).json({ error: 'Solo el autor o un admin puede borrarla' });
+  await query('DELETE FROM conversation_notes WHERE id = ?', [n.id]);
+  require('../bus').emitEvent('note.changed', { jid: n.jid, action: 'deleted', note_id: n.id, by: req.session.user.display_name });
+  res.json({ ok: true });
+});
+
 router.post('/conversations/:jid/read', requireAuth, async (req, res) => {
   const jid = decodeURIComponent(req.params.jid);
   await query('UPDATE conversations SET unread_count = 0 WHERE jid = ?', [jid]);
@@ -439,6 +489,7 @@ router.delete('/conversations/:jid', requireAuth, async (req, res) => {
 
   if (hard === '1') {
     await query('DELETE FROM messages WHERE jid = ?', [jid]);
+    await query('DELETE FROM conversation_notes WHERE jid = ?', [jid]);
   }
 
   await query('DELETE FROM conversations WHERE jid = ?', [jid]);

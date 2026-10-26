@@ -54,11 +54,11 @@
 
   <div class="card">
     <h3>Agregar conocimiento</h3>
-    <div class="tabs">
-      <button class="tab active" data-p="note">📝 Nota rápida</button>
-      <button class="tab" data-p="url">🌐 Desde una URL</button>
-      <button class="tab" data-p="file">📄 Archivo</button>
-      <button class="tab" data-p="test">🔎 Probar búsqueda</button>
+    <div class="tabs" role="tablist" aria-label="Formas de agregar conocimiento">
+      <button class="tab active" role="tab" aria-selected="true" aria-controls="p-note" data-p="note">📝 Nota rápida</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="p-url" data-p="url">🌐 Desde una URL</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="p-file" data-p="file">📄 Archivo</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="p-test" data-p="test">🔎 Probar búsqueda</button>
     </div>
 
     <div class="pane active" id="p-note">
@@ -121,9 +121,9 @@
 </div>
 
 <datalist id="cats"></datalist>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 
-<div id="edit-modal" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:50;align-items:center;justify-content:center;padding:20px">
+<div id="edit-modal" role="dialog" aria-modal="true" aria-label="Editar entrada" style="display:none;position:fixed;inset:0;background:rgba(15,23,42,.45);z-index:50;align-items:center;justify-content:center;padding:20px">
   <div class="card" style="width:100%;max-width:720px;max-height:90vh;overflow:auto;margin:0">
     <h3>Editar</h3>
     <input type="hidden" id="e-id">
@@ -166,7 +166,7 @@ async function run(btn, fn) {
 }
 
 document.querySelectorAll('.tab').forEach(b => b.onclick = () => {
-  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.tab').forEach(x => { x.classList.toggle('active', x === b); x.setAttribute('aria-selected', x === b ? 'true' : 'false'); });
   document.querySelectorAll('.pane').forEach(p => p.classList.toggle('active', p.id === 'p-' + b.dataset.p));
 });
 
@@ -265,6 +265,7 @@ async function openEdit(id) {
     $('edit-modal').style.display = 'flex';
   });
 }
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeEdit(); });
 function closeEdit() { $('edit-modal').style.display = 'none'; }
 async function saveEdit() {
   await run(event.target, async () => {
@@ -274,5 +275,6 @@ async function saveEdit() {
 }
 load();
 </script>
+<script src="/js/a11y.js"></script>
 </body>
 </html>

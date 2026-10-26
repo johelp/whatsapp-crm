@@ -18,8 +18,8 @@
   /* ─ Texto ─ */
   --text:      #0f172a;
   --text2:     #475569;
-  --text3:     #94a3b8;
-  --text4:     #cbd5e1;
+  --text3:     #5b6b82;   /* 5.3:1 sobre blanco (antes #94a3b8 = 2.6:1) */
+  --text4:     #94a3b8;
 
   /* ─ Acento WhatsApp ─ */
   --wa:        #16a34a;
@@ -506,10 +506,10 @@ html, body {
 
 .empty-icon { font-size: 48px; opacity: 0.25; }
 .chat-empty p { font-size: 14px; font-weight: 500; color: var(--text3); }
-.chat-empty span { font-size: 12px; color: var(--text4); }
+.chat-empty span { font-size: 12px; color: var(--text3); }
 
 .chat-active {
-  display: flex;
+  display: none;   /* se muestra al abrir una conversación (antes la cabecera y el composer aparecían vacíos sin chat elegido) */
   flex-direction: column;
   height: 100%;
   overflow: hidden;
@@ -1597,7 +1597,8 @@ textarea.input { resize: vertical; line-height: 1.5; }
   .ch-name { font-size: 13px; }
   .ch-meta { font-size: 11px; }
 
-  .info-sidebar { display: none !important; }
+  /* En pantallas chicas la ficha pasa a ser un panel superpuesto (antes se ocultaba y las notas no eran accesibles) */
+  .info-sidebar.open { position: fixed; top: 0; right: 0; bottom: 0; width: min(88vw, 340px); z-index: 60; box-shadow: -8px 0 24px rgba(0,0,0,.25); }
 
   .panel-topbar { flex-wrap: wrap; gap: 8px; }
 }
@@ -1718,12 +1719,13 @@ textarea.input { resize: vertical; line-height: 1.5; }
   transition: background 0.12s, transform 0.08s;
 }
 .chat-item:hover {
-  background: var(--surface2);
-  transform: translateX(2px);
+  background: var(--surface2);   /* sin transform: desplazaba la fila y generaba scroll horizontal */
 }
 .chat-item.active {
-  background: linear-gradient(90deg, var(--wa-light) 0%, #f0fdf4 100%);
+  background: var(--wa-light);
+  box-shadow: inset 3px 0 0 var(--wa);
 }
+.chat-item.active .chat-item-name, .chat-item.active .chat-name { color: var(--text); }
 
 /* ─── Input de mensaje ───────────────────────────── */
 #msg-input {
@@ -1835,9 +1837,9 @@ textarea.input { resize: vertical; line-height: 1.5; }
     --border:    #334155;
     --border2:   #475569;
     --text:      #f1f5f9;
-    --text2:     #94a3b8;
-    --text3:     #64748b;
-    --text4:     #475569;
+    --text2:     #cbd5e1;
+    --text3:     #94a3b8;   /* 5.7:1 sobre surface (antes #64748b = 3.1:1) */
+    --text4:     #64748b;
     --wa-light:  #14532d;
     --blue-light: #1e3a5f;
     --amber-light: #451a03;
@@ -1851,3 +1853,73 @@ textarea.input { resize: vertical; line-height: 1.5; }
     background: var(--surface);
   }
 }
+
+/* ─── Accesibilidad y robustez (revisión de interfaz) ─────────────────────── */
+:focus-visible {
+  outline: 2px solid var(--primary) !important;
+  outline-offset: 2px;
+}
+.nav-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; vertical-align: middle; }
+[role="button"], .btn-icon-sm, .btn-icon-md, .nav-item, .lchip { cursor: pointer; }
+
+/* Cabecera del chat: los selectores ya no pisan nombre ni etiquetas en pantallas angostas */
+.chat-header { flex-wrap: wrap; row-gap: 6px; }
+.chat-header-info { flex: 1 1 160px; min-width: 140px; }
+.ch-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-header-actions { flex-wrap: wrap; margin-left: auto; }
+
+/* Táctil: objetivos de al menos 44 px */
+@media (pointer: coarse) {
+  .btn-icon-sm, .btn-icon-md { min-width: 44px; min-height: 44px; }
+  .nav-item { min-height: 44px; }
+  select, .input, input, textarea { font-size: 16px; }   /* evita el zoom automático de iOS */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+/* Clasificación IA */
+.ai-chip { font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 20px; white-space: nowrap; }
+.ai-p-urgent { background: var(--red-light); color: #b91c1c; border: 1px solid #fca5a5; }
+.ai-p-high { background: var(--amber-light); color: #92400e; border: 1px solid #fcd34d; }
+.ai-p-ok { background: var(--wa-light); color: #166534; border: 1px solid var(--wa-mid); }
+@media (prefers-color-scheme: dark) {
+  .ai-p-urgent { color: #fca5a5; border-color: #991b1b; }
+  .ai-p-high { color: #fcd34d; border-color: #92400e; }
+  .ai-p-ok { color: #86efac; border-color: #166534; }
+}
+.ch-ai { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+.ch-ai:empty { display: none; }
+.ai-intent { font-size: 11px; color: var(--text2); font-style: italic; }
+
+/* Notas internas */
+.notes-count { font-weight: 500; color: var(--text3); }
+.note-form textarea { width: 100%; font-size: 12px; resize: vertical; min-height: 56px; }
+.note-form-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
+.note-pin-opt { font-size: 11px; color: var(--text2); display: flex; gap: 5px; align-items: center; cursor: pointer; }
+.notes-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.note { background: var(--surface2); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; }
+.note.pinned { border-color: var(--amber); background: var(--amber-light); }
+.note-text { font-size: 12px; line-height: 1.5; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 10px; color: var(--text3); margin-top: 6px; }
+.note-author { font-weight: 600; }
+.note-actions { margin-left: auto; display: flex; gap: 2px; }
+.note-actions .btn-icon-sm { opacity: .75; }
+.note-actions .btn-icon-sm:hover, .note-actions .btn-icon-sm:focus-visible { opacity: 1; }
+.notes-empty { font-size: 11px; color: var(--text3); line-height: 1.5; margin: 0; }
+.pinned-notes { display: none; background: var(--amber-light); border-bottom: 1px solid var(--amber); padding: 6px 16px; max-height: 84px; overflow-y: auto; flex-shrink: 0; }
+.pinned-note { font-size: 12px; color: var(--text); line-height: 1.45; }
+.pinned-note small { color: var(--text3); }
+.notes-badge { position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--primary); color: #fff; font-size: 10px; font-weight: 700; display: flex; align-items: center; justify-content: center; padding: 0 4px; }
+#btn-toggle-sidebar { position: relative; }
+/* Ítem activo del menú: contraste suficiente en modo oscuro */
+@media (prefers-color-scheme: dark) { .nav-item.active { color: #86efac; } }
+
+/* La ficha del cliente (notas) no debe robarle espacio al chat en pantallas medianas: panel superpuesto */
+@media (max-width: 1100px) {
+  .info-sidebar.open { position: fixed; top: 0; right: 0; bottom: 0; width: min(88vw, 340px); z-index: 60; box-shadow: -8px 0 24px rgba(0,0,0,.25); }
+}
+
+.info-close { display: none; align-self: flex-end; font-size: 14px; }
+@media (max-width: 1100px) { .info-close { display: inline-flex; } }

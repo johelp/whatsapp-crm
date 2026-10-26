@@ -329,6 +329,15 @@ async function createTables() {
       last_fetched_at BIGINT,
       created_at TEXT DEFAULT (datetime('now'))
     )`,
+    `CREATE TABLE IF NOT EXISTS conversation_notes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      jid TEXT NOT NULL,
+      user_id INTEGER,
+      text TEXT NOT NULL,
+      pinned INTEGER DEFAULT 0,
+      created_at BIGINT,
+      updated_at BIGINT
+    )`,
     // ── Anti-ban e integraciones (tiempos como epoch ms BIGINT: portables SQLite/PG) ──
     `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,

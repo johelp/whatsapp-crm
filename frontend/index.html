@@ -23,31 +23,31 @@
     </div>
   </div>
 
-  <nav class="nav-links">
+  <nav class="nav-links" aria-label="Secciones principales">
     <a class="nav-item active" data-panel="inbox" onclick="showPanel('inbox')" href="#">
-      <span class="nav-icon">💬</span>
+      <span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
       <span class="nav-label">Bandeja</span>
       <span class="nav-badge" id="badge-inbox" style="display:none">0</span>
     </a>
     <a class="nav-item" data-panel="campaigns" onclick="showPanel('campaigns')" href="#">
-      <span class="nav-icon">📢</span>
+      <span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg></span>
       <span class="nav-label">Campañas</span>
     </a>
     <a class="nav-item" data-panel="contacts" onclick="showPanel('contacts')" href="#">
-      <span class="nav-icon">👥</span>
+      <span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
       <span class="nav-label">Contactos</span>
     </a>
     <a class="nav-item" href="/knowledge.html" title="Base de conocimiento de la IA">
-      <span class="nav-icon">🧠</span>
+      <span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h7M9 11h7"/></svg></span>
       <span class="nav-label">Conocimiento</span>
     </a>
     <a class="nav-item" href="/normalizer.html" title="Normalizador de números">
-      <span class="nav-icon">🔢</span>
+      <span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 9h16M4 15h16M10 3 8 21M16 3l-2 18"/></svg></span>
       <span class="nav-label">Normalizar</span>
     </a>
     <a class="nav-item" data-panel="settings" onclick="showPanel('settings')" href="#">
-      <span class="nav-icon">⚙️</span>
-      <span class="nav-label">Configuracion</span>
+      <span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+      <span class="nav-label">Configuración</span>
     </a>
   </nav>
 
@@ -121,6 +121,7 @@
               <span id="ch-company" class="ch-company"></span>
             </div>
             <div id="ch-labels" class="ch-labels"></div>
+            <div id="ch-ai" class="ch-ai" aria-live="polite"></div>
           </div>
           <div class="chat-header-actions">
             <div id="viewing-indicator" class="viewing-indicator"></div>
@@ -134,9 +135,12 @@
             </select>
             <button class="btn-icon-md" id="btn-save-contact" onclick="saveContactFromChat()" title="Guardar contacto">👤</button>
             <button class="btn-icon-md" onclick="deleteConversationPrompt()" title="Eliminar conversación">🗑</button>
-            <button class="btn-icon-md" id="btn-toggle-sidebar" onclick="toggleInfoSidebar()" title="Info y etiquetas">☰</button>
+            <button class="btn-icon-md" id="btn-toggle-sidebar" onclick="toggleInfoSidebar()" title="Ficha del cliente: notas y etiquetas" aria-label="Ficha del cliente: notas y etiquetas">☰<span id="notes-badge" class="notes-badge" style="display:none"></span></button>
           </div>
         </header>
+
+        <!-- Notas fijadas: visibles siempre que se abre el chat -->
+        <div class="pinned-notes" id="pinned-notes" role="region" aria-label="Notas fijadas"></div>
 
         <!-- Messages -->
         <div class="messages-area" id="messages-area"></div>
@@ -171,6 +175,18 @@
 
     <!-- Info sidebar -->
     <div class="info-sidebar" id="info-sidebar">
+      <button class="info-close btn-icon-sm" onclick="toggleInfoSidebar()" aria-label="Cerrar ficha del cliente" title="Cerrar">✕</button>
+      <div class="info-section notes-section">
+        <h4>Notas internas <span id="notes-count" class="notes-count"></span></h4>
+        <div class="note-form">
+          <textarea id="note-input" class="input" rows="2" maxlength="2000" aria-label="Nueva nota interna" placeholder="Ej: prefiere audio, alérgico al látex… (Ctrl+Enter para guardar)"></textarea>
+          <div class="note-form-actions">
+            <label class="note-pin-opt"><input type="checkbox" id="note-pin"> Fijar</label>
+            <button class="btn-primary btn-sm" onclick="addNote()">Guardar nota</button>
+          </div>
+        </div>
+        <div id="notes-list" class="notes-list"></div>
+      </div>
       <div class="info-section">
         <h4>Etiquetas</h4>
         <div id="conv-labels-active"></div>
@@ -568,6 +584,7 @@
 </div>
 
 <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+<script src="/js/a11y.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>
