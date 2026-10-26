@@ -348,6 +348,14 @@ async function createTables() {
       tokens INTEGER DEFAULT 0,
       errors INTEGER DEFAULT 0
     )`,
+    `CREATE TABLE IF NOT EXISTS dsr_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      action TEXT NOT NULL,
+      subject_hash TEXT,
+      by_user INTEGER,
+      counts TEXT,
+      created_at BIGINT
+    )`,
     // ── Anti-ban e integraciones (tiempos como epoch ms BIGINT: portables SQLite/PG) ──
     `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,
@@ -531,6 +539,12 @@ async function runMigrations() {
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_sentiment TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_lang TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_classified_at BIGINT`,
+    // ── v3: privacidad (RGPD / ePrivacy / Reglamento de IA) ──────
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS consent_status TEXT DEFAULT 'unknown'`,
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS consent_source TEXT`,
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS consent_at BIGINT`,
+    `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS consent_evidence TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disclosed INTEGER DEFAULT 0`,
     // ── v3: base de conocimiento ────────────────────────────────
     `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'`,
     `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS source_url TEXT`,

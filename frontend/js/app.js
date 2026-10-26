@@ -1078,6 +1078,8 @@ async function saveContact() {
     extra: document.getElementById('ct-extra').value,
     notes: document.getElementById('ct-notes').value,
   };
+  const consentNow = document.getElementById('ct-consent').value;
+  if (consentNow !== (window._ctConsent0 || 'unknown')) { body.consent_status = consentNow; body.consent_source = 'manual'; }
   if (!body.phone) { notify('El teléfono es obligatorio', 'error'); return; }
 
   if (window._saveFromChat) {
@@ -1645,7 +1647,7 @@ async function addContactsToCampaign() {
 
   const res = await apiFetch(`/campaigns/${campId}/contacts/add`, {
     method: 'POST',
-    body: JSON.stringify({ contacts }),
+    body: JSON.stringify({ contacts, consent_attest: !!document.getElementById('c-consent-attest')?.checked }),
   });
 
   if (res?.added !== undefined) {
@@ -1697,7 +1699,7 @@ async function saveCampaign() {
 
     const res = await apiFetch('/campaigns', {
       method: 'POST',
-      body: JSON.stringify({ ...body, contacts }),
+      body: JSON.stringify({ ...body, contacts, consent_attest: !!document.getElementById('c-consent-attest')?.checked }),
     });
 
     if (res?.id) {
@@ -1794,6 +1796,11 @@ function previewMsg() {
 }
 
 async function startCampaign(id) {
+  const chk = await apiFetch(`/campaigns/${id}/consent-check`);
+  if (chk?.ok && chk.will_skip > 0) {
+    if (chk.will_skip >= chk.total) { notify('Ningún contacto de esta campaña tiene consentimiento registrado. Cargalos con la declaración de consentimiento o actualizá cada contacto.', 'error'); return; }
+    if (!confirm(`${chk.will_skip} de ${chk.total} contactos no recibirán el mensaje por falta de consentimiento registrado o por haberse dado de baja. ¿Iniciar igual con el resto?`)) return;
+  }
   const res = await apiFetch(`/campaigns/${id}/start`, { method: 'POST' });
   if (res?.error) notify(res.error, 'error');
   else { S.activeCampaignId = id; loadCampaigns(); }
@@ -1819,6 +1826,12 @@ async function loadContacts() {
   S.contacts = await apiFetch('/contacts') || [];
   document.getElementById('contacts-count').textContent = `${S.contacts.length} contactos`;
   renderContactsTable();
+}
+
+function consentBadge(c) {
+  const st = c.consent_status || 'unknown';
+  const m = { granted: ['Consentimiento', 'ai-p-ok'], revoked: ['Baja', 'ai-p-urgent'], unknown: ['Sin consentimiento', 'ai-p-high'] }[st] || ['', ''];
+  return `<span class="ai-chip ${m[1]}" title="Consentimiento para comunicaciones comerciales: ${m[0].toLowerCase()}">${m[0]}</span>`;
 }
 
 function renderContactsTable() {
@@ -1851,7 +1864,7 @@ function renderContactsTable() {
       `<span class="tl-pill" style="background:${l.color}20;color:${l.color};border:1px solid ${l.color}40">${esc(l.name)}</span>`
     ).join('');
     return `<tr>
-      <td>${esc(c.name || '—')}</td>
+      <td>${esc(c.name || '—')} ${consentBadge(c)}</td>
       <td class="td-phone">${c.phone}</td>
       <td>${esc(c.company || '—')}</td>
       <td>${esc(c.extra || '—')}</td>
@@ -1876,6 +1889,11 @@ function openContactModal(id) {
   document.getElementById('ct-company').value = c?.company || '';
   document.getElementById('ct-extra').value = c?.extra || '';
   document.getElementById('ct-notes').value = c?.notes || '';
+  window._ctConsent0 = c?.consent_status || 'unknown';
+  document.getElementById('ct-consent').value = window._ctConsent0;
+  document.getElementById('ct-consent-info').textContent = c?.consent_at
+    ? `Registrado el ${new Date(Number(c.consent_at)).toLocaleDateString('es-AR')}${c.consent_source ? ' · origen: ' + c.consent_source : ''}.`
+    : 'Las campañas solo se envían a quienes dieron su consentimiento. Quien responde BAJA queda como revocado.';
   openModal('modal-contact');
 }
 
@@ -1888,8 +1906,10 @@ async function deleteContact(id) {
 async function importCSV(event) {
   const file = event.target.files[0];
   if (!file) return;
+  const attest = confirm('¿Declarás que estas personas dieron su consentimiento para recibir comunicaciones comerciales por WhatsApp (o tenés una relación previa que lo permite)?\n\nAceptar: se registran con consentimiento declarado por vos.\nCancelar: se importan SIN consentimiento y no podrán recibir campañas.');
   const formData = new FormData();
   formData.append('file', file);
+  formData.append('consent_attest', attest ? '1' : '0');
   const res = await fetch('/api/contacts/import', { method: 'POST', body: formData, credentials: 'include' });
   const data = await res.json();
   notify(`✅ Importados: ${data.imported} · Omitidos: ${data.skipped}`);
@@ -1907,7 +1927,7 @@ async function renderSettings() {
 
   const TABS = [
     ['whatsapp', 'WhatsApp'], ['conv', 'Conversaciones'], ['auto', 'Automatización'],
-    ...(isAdmin ? [['team', 'Equipo'], ['ai', 'Inteligencia artificial'], ['system', 'Sistema']] : []),
+    ...(isAdmin ? [['team', 'Equipo'], ['ai', 'Inteligencia artificial'], ['privacy', 'Privacidad'], ['system', 'Sistema']] : []),
   ];
   if (!TABS.some(t => t[0] === S.settingsTab)) S.settingsTab = 'whatsapp';
 
@@ -1928,6 +1948,12 @@ async function renderSettings() {
       <h3>🛡️ Envíos y protección anti-bloqueo</h3>
       <div id="antiban-box" style="font-size:12px;color:var(--text3)">Cargando…</div>
       <a href="/guia.html" target="_blank" rel="noopener" style="display:inline-block;margin-top:10px;font-size:12px;color:var(--primary)">Cómo funciona y cómo evitar problemas</a>
+    </div>` : ''}
+
+    ${isAdmin ? `<div class="settings-card full" id="privacy-card" data-sec="privacy">
+      <h3>🔒 Privacidad y cumplimiento (RGPD · ePrivacy · Reglamento de IA)</h3>
+      <p style="font-size:12px;color:var(--text3);margin:0 0 14px">Estos ajustes te ayudan a cumplir la normativa europea. No sustituyen el asesoramiento legal: ver <a href="https://github.com/johelp/whatsapp-crm/blob/main/docs/legal/CUMPLIMIENTO_EUROPA.md" target="_blank" rel="noopener" style="color:var(--primary)">el informe de cumplimiento</a>.</p>
+      <div id="privacy-form" style="font-size:13px;color:var(--text3)">Cargando…</div>
     </div>` : ''}
 
     <!-- Quick Replies -->
@@ -2105,8 +2131,127 @@ async function renderSettings() {
     loadSystemStats();
     loadAntibanCard();
     loadBackups();
+    loadPrivacy();
   }
   showSettingsTab(S.settingsTab);
+}
+
+async function loadPrivacy() {
+  const box = document.getElementById('privacy-form');
+  if (!box) return;
+  const p = await apiFetch('/privacy/settings');
+  if (!p || p.error) { box.textContent = 'No se pudo cargar.'; return; }
+  box.innerHTML = `
+    <h4 style="margin:0 0 6px">🤖 Aviso de inteligencia artificial</h4>
+    <p style="font-size:12px;margin:0 0 8px">Reglamento de IA, art. 50(1): la primera respuesta de la IA en cada conversación debe informar que se habla con una IA. Escribir <b>persona</b> deriva a un operador.</p>
+    <label class="note-pin-opt" style="margin-bottom:8px"><input type="checkbox" id="pv-ai-on" ${p.ai_disclosure_enabled ? 'checked' : ''} ${p.ai_disclosure_locked ? 'disabled' : ''}> Avisar que es una IA ${p.ai_disclosure_locked ? '<b>(bloqueado por la instalación)</b>' : ''}</label>
+    <textarea class="input" id="pv-ai-text" rows="2" maxlength="500" aria-label="Texto del aviso de IA">${esc(p.ai_disclosure_text)}</textarea>
+    <p class="field-hint">Usá {{empresa}} para el nombre de tu empresa (se toma de la configuración de IA).${!p.ai_disclosure_enabled ? ' <b style="color:var(--red)">Apagarlo puede incumplir el art. 50(1) en la UE.</b>' : ''}</p>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
+    <h4 style="margin:0 0 6px">📣 Consentimiento y campañas</h4>
+    <div class="field" style="max-width:420px"><label for="pv-consent">Quién puede recibir campañas</label>
+      <select class="input" id="pv-consent">
+        <option value="require" ${p.campaign_consent === 'require' ? 'selected' : ''}>Solo contactos con consentimiento (recomendado)</option>
+        <option value="allow_unknown" ${p.campaign_consent === 'allow_unknown' ? 'selected' : ''}>También contactos sin dato (nunca los dados de baja)</option>
+      </select></div>
+    <label class="note-pin-opt" style="margin:8px 0"><input type="checkbox" id="pv-foot-on" ${p.campaign_footer_enabled ? 'checked' : ''}> Agregar pie de baja a cada campaña</label>
+    <input class="input" id="pv-foot-text" maxlength="200" value="${esc(p.campaign_footer_text)}" aria-label="Texto del pie de baja">
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:18px 0">
+    <h4 style="margin:0 0 6px">🗓 Retención de datos</h4>
+    <p style="font-size:12px;margin:0 0 8px">Borra automáticamente (cada noche) los mensajes más antiguos que este plazo, las conversaciones que queden vacías con sus notas, los envíos y entregas de webhooks y el registro de actividad. <b>0 = no borrar nunca.</b> Los contactos no se borran. Los respaldos conservan datos hasta 7 días más.</p>
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin:0"><label for="pv-ret">Conservar (días)</label><input class="input" type="number" min="0" max="3650" id="pv-ret" value="${p.retention_days}" style="width:140px"></div>
+      <button class="btn-secondary" onclick="previewRetention()">Ver qué se borraría</button>
+    </div>
+    <div id="pv-ret-out" style="font-size:12px;margin-top:8px"></div>
+
+    <div style="margin-top:16px"><button class="btn-primary" onclick="savePrivacySettings()">Guardar ajustes de privacidad</button></div>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:22px 0">
+    <h4 style="margin:0 0 6px">👤 Derechos de los interesados (acceso, portabilidad y supresión)</h4>
+    <p style="font-size:12px;margin:0 0 8px">Buscá a una persona por su teléfono para exportar todos sus datos (JSON) o eliminarlos por completo. La eliminación es <b>irreversible</b> y queda registrada (solo con un identificador cifrado, no con el teléfono).</p>
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <div class="field" style="margin:0"><label for="pv-q">Teléfono</label><input class="input mono" id="pv-q" placeholder="+34 600 000 000" style="width:230px" onkeydown="if(event.key==='Enter')searchSubject()"></div>
+      <button class="btn-secondary" onclick="searchSubject()">Buscar</button>
+    </div>
+    <div id="pv-subject" style="margin-top:12px;font-size:12px"></div>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:22px 0">
+    <h4 style="margin:0 0 6px">🧾 Registro de eliminaciones</h4>
+    <div id="pv-erasures" style="font-size:12px">Cargando…</div>`;
+  loadErasureLog();
+}
+
+async function savePrivacySettings() {
+  const body = {
+    ai_disclosure_enabled: document.getElementById('pv-ai-on').checked ? 1 : 0,
+    ai_disclosure_text: document.getElementById('pv-ai-text').value,
+    campaign_consent: document.getElementById('pv-consent').value,
+    campaign_footer_enabled: document.getElementById('pv-foot-on').checked ? 1 : 0,
+    campaign_footer_text: document.getElementById('pv-foot-text').value,
+    retention_days: parseInt(document.getElementById('pv-ret').value, 10) || 0,
+  };
+  const r = await apiFetch('/privacy/settings', { method: 'PUT', body: JSON.stringify(body) });
+  if (r && !r.error) { notify('Ajustes de privacidad guardados'); loadPrivacy(); } else notify(r?.error || 'Error guardando', 'error');
+}
+
+async function previewRetention() {
+  const out = document.getElementById('pv-ret-out');
+  const days = parseInt(document.getElementById('pv-ret').value, 10) || 0;
+  if (!days) { out.textContent = 'Con 0 días no se borra nada.'; return; }
+  await apiFetch('/privacy/settings', { method: 'PUT', body: JSON.stringify({ retention_days: days }) });
+  const r = await apiFetch('/privacy/retention/preview');
+  if (!r?.ok) { out.textContent = 'No se pudo calcular.'; return; }
+  const items = Object.entries(r.counts).map(([k, v]) => `${k.replace(/_/g, ' ')}: <b>${v}</b>`).join(' · ');
+  out.innerHTML = `Con ${r.days} días se borrarían ahora → ${items} <button class="btn-danger btn-sm" style="margin-left:8px" onclick="runRetention()">Ejecutar ahora</button>`;
+}
+
+async function runRetention() {
+  if (!confirm('Se borrarán definitivamente los datos vencidos. ¿Continuar?')) return;
+  const r = await apiFetch('/privacy/retention/run', { method: 'POST' });
+  if (r?.ok) { notify('Limpieza ejecutada'); document.getElementById('pv-ret-out').textContent = 'Listo: ' + JSON.stringify(r.counts); } else notify('No se pudo ejecutar', 'error');
+}
+
+async function searchSubject() {
+  const q = document.getElementById('pv-q').value.trim();
+  const box = document.getElementById('pv-subject');
+  if (!q) return;
+  const r = await apiFetch('/privacy/subject?q=' + encodeURIComponent(q));
+  if (!r?.ok) { box.innerHTML = `<span style="color:var(--red)">${esc(r?.error || 'Error')}</span>`; return; }
+  if (!r.found) { box.textContent = 'No se encontraron datos de esa persona.'; return; }
+  const who = r.contacts.map(c => esc(c.name || c.phone)).join(', ') || 'Sin ficha de contacto';
+  box.innerHTML = `
+    <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:12px">
+      <div style="color:var(--text);font-weight:600;margin-bottom:6px">${who}</div>
+      Conversaciones: <b>${r.conversations}</b> · Mensajes: <b>${r.messages}</b> · Mensajes en grupos: <b>${r.group_messages}</b> · Notas: <b>${r.notes}</b> · Filas de campañas: <b>${r.campaign_rows}</b> · Avisos en cola: <b>${r.queued_messages}</b>${r.blocked ? ' · <b>En lista de bloqueo</b> (se conserva como registro de supresión)' : ''}
+      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-top:12px">
+        <a class="btn-secondary" href="/api/privacy/export?q=${encodeURIComponent(q)}" download>⬇ Exportar datos (JSON)</a>
+        <div class="field" style="margin:0"><label for="pv-confirm">Para eliminar, repetí el teléfono</label><input class="input mono" id="pv-confirm" style="width:200px" placeholder="${esc(q)}"></div>
+        <button class="btn-danger" onclick="eraseSubject('${esc(q).replace(/'/g, '')}')">Eliminar todos sus datos</button>
+      </div>
+    </div>`;
+}
+
+async function eraseSubject(q) {
+  const confirmTxt = document.getElementById('pv-confirm').value.trim();
+  if (!confirmTxt) { notify('Repetí el teléfono para confirmar', 'error'); return; }
+  if (!confirm('Se eliminarán DEFINITIVAMENTE todos los datos de esta persona. No se puede deshacer. ¿Continuar?')) return;
+  const r = await apiFetch('/privacy/erase', { method: 'POST', body: JSON.stringify({ q, confirm: confirmTxt }) });
+  if (r?.ok) { notify('Datos eliminados'); document.getElementById('pv-subject').innerHTML = `<div style="background:var(--wa-light);color:var(--wa);border-radius:8px;padding:10px">Eliminado: ${Object.entries(r.counts).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`).join(' · ')}</div>`; loadErasureLog(); loadConversations(); loadContacts(); }
+  else notify(r?.error || 'No se pudo eliminar', 'error');
+}
+
+async function loadErasureLog() {
+  const box = document.getElementById('pv-erasures');
+  if (!box) return;
+  const r = await apiFetch('/privacy/erasure-log');
+  if (!r?.ok) { box.textContent = 'No se pudo cargar.'; return; }
+  box.innerHTML = r.log.length
+    ? `<table style="width:100%;border-collapse:collapse">${r.log.slice(0, 15).map(l => `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 10px 5px 0">${new Date(l.created_at).toLocaleString('es-AR')}</td><td style="padding-right:10px;font-family:monospace">${esc(l.subject_hash.slice(0, 12))}…</td><td>${Object.entries(l.counts).filter(([, v]) => v).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`).join(' · ')}</td></tr>`).join('')}</table>
+       <p style="margin:8px 0 0">Si restaurás un respaldo anterior, volvé a aplicar estas eliminaciones. <a href="data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(r.log.map(l => l.subject_hash)))}" download="eliminaciones.json" style="color:var(--primary)">Descargar lista de identificadores</a></p>`
+    : 'Todavía no se eliminó a nadie.';
 }
 
 function showSettingsTab(id) {

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 /**
  * Restaura un respaldo (.ndjson.gz) generado por WhatsFlow en la base configurada (DATABASE_URL o SQLite local).
- *   node scripts/restore-backup.js <archivo> [--force]
+ *   node scripts/restore-backup.js <archivo> [--force] [--erasures eliminaciones.json]
  * Sin --force aborta si alguna tabla ya tiene datos. Con --force vacía las tablas antes de importar.
  * La API key de la IA no viaja en el respaldo: volvé a cargarla en Configuración → IA.
+ * --erasures: lista de identificadores (Configuración → Privacidad → Registro de eliminaciones) para volver a aplicar
+ *   las supresiones hechas DESPUÉS de crearse el respaldo (RGPD, art. 17: un dato borrado no debe reaparecer al restaurar).
  */
 require('dotenv').config();
 process.env.SKIP_SEED = '1';   // la base destino debe quedar solo con lo del respaldo
@@ -44,6 +46,21 @@ const { initDB, query, queryOne, saveDb, USE_PG } = require('../backend/db');
       await query(`SELECT setval(pg_get_serial_sequence('${t}', 'id'), (SELECT COALESCE(MAX(id), 1) FROM ${t}))`).catch(() => {});
     }
     console.log(`  ${t}: ${rows.length}`);
+  }
+  // Reaplicar supresiones posteriores al respaldo
+  const efIdx = process.argv.indexOf('--erasures');
+  if (efIdx > -1) {
+    const dsr = require('../backend/dsr'), { phoneVariants } = require('../backend/antiban');
+    const raw = JSON.parse(fs.readFileSync(process.argv[efIdx + 1], 'utf8'));
+    const wanted = new Set(raw.map(x => (typeof x === 'string' ? x : x.subject_hash)));
+    const phones = new Set((await query('SELECT phone FROM contacts')).map(r => r.phone));
+    (await query("SELECT jid FROM conversations WHERE jid NOT LIKE '%@g.us'")).forEach(r => phones.add(r.jid.split('@')[0].replace(/\D/g, '')));
+    let n = 0;
+    for (const p of phones) {
+      if (p.length < 7) continue;
+      if (phoneVariants(p).some(v => wanted.has(dsr.hash(v)))) { try { await dsr.eraseSubject(p); n++; } catch (e) {} }
+    }
+    console.log(`Supresiones reaplicadas: ${n}`);
   }
   if (!USE_PG) saveDb();
   console.log('Restauración completa.');

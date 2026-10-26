@@ -410,6 +410,7 @@ async function processMessage(msg) {
   const optedOut = OPT_OUT_RE.test(text || '');
   if (optedOut) {
     await query('INSERT OR IGNORE INTO blocked_numbers (phone, reason, created_at) VALUES (?, ?, ?)', [phone, 'opt-out por mensaje', Date.now()]).catch(() => {});
+    await require('./privacy').setConsent(phone, 'revoked', 'opt_out_message').catch(() => {});   // la baja queda registrada como consentimiento revocado
     emitEvent('contact.opted_out', { phone, jid });
   }
   emitEvent('message.received', { jid, phone, name: displayName, type, text: content, timestamp, message_id: msg.key.id, is_group: false });
@@ -497,7 +498,7 @@ async function processOutgoingMessage(msg) {
   if (io) {
     io.emit('message:sent', { jid, content, timestamp, direction: 'out', type, sent_by: null, sent_by_name: '📱 Móvil', sent_by_color: '#94a3b8', from_device: true, media_data: mediaData });
   }
-  console.log(`[fromDevice] ${jid.split('@')[0]}: ${content.substring(0, 60)}`);
+  console.log(`[fromDevice] mensaje saliente registrado (${require('./redact').maskPhone(jid)})`);
 }
 
 // ─── Connect ──────────────────────────────────────────────────────────────────
@@ -584,7 +585,7 @@ async function connect() {
       qrData = null;
       emitEvent('connection.update', { status: 'connected' });
       const phone = sock.user?.id?.split(':')[0] || '';
-      console.log(`WhatsApp conectado: ${phone}`);
+      console.log(`WhatsApp conectado: ${require('./redact').maskPhone(phone)}`);
       // Emitir ambos strings — el frontend puede escuchar cualquiera
       if (io) {
         io.emit('wa:status', { status: 'open', phone });
@@ -745,7 +746,7 @@ async function connect() {
   // Cuando WA comparte el número real de un contacto @lid
   sock.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
     if (!lid || !jid) return;
-    console.log(`[LID→Phone] ${lid} → ${jid}`);
+    console.log('[LID→Phone] vínculo de identificador actualizado');
     const phone = extractPhone(jid);
     try {
       // Buscar si hay conversación con este LID
@@ -871,7 +872,7 @@ async function sendMessage(phone, text, sentBy = null, opts = {}) {
     if (cold && convJid.endsWith('@s.whatsapp.net')) {
       const exists = await numberExists(convJid);
       antiban.reportNumberCheck(exists === false);
-      if (exists === false) throw new antiban.GateError('NOT_ON_WHATSAPP', `El número ${convJid.split('@')[0]} no tiene WhatsApp`);
+      if (exists === false) throw new antiban.GateError('NOT_ON_WHATSAPP', 'El número no tiene WhatsApp');
     }
     // Typing indicator solo para @s.whatsapp.net (no @lid — causa "Esperando")
     if (convJid.endsWith('@s.whatsapp.net')) {
@@ -883,7 +884,8 @@ async function sendMessage(phone, text, sentBy = null, opts = {}) {
     return sock.sendMessage(convJid, { text });
   });
 
-  await saveMessage({ message_id: sent.key.id, jid: convJid, direction: 'out', type: 'text', content: text, timestamp: Date.now(), is_auto_reply: 0, sent_by: sentBy });
+  // Los mensajes generados por la IA quedan marcados (trazabilidad, Reglamento de IA)
+  await saveMessage({ message_id: sent.key.id, jid: convJid, direction: 'out', type: 'text', content: text, timestamp: Date.now(), is_auto_reply: opts.kind === 'ai' ? 1 : 0, sent_by: sentBy });
 
   const existing = await queryOne('SELECT id FROM conversations WHERE jid = ?', [convJid]);
   if (existing) {

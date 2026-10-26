@@ -226,6 +226,11 @@ cron.schedule('30 3 * * *', () => require('./backup').createBackup()
   .then(r => console.log(`[backup] ${r.name} (${Math.round(r.size / 1024)} KB)`))
   .catch(e => console.error('[backup] falló:', e.message)));
 
+// ─── Cron: purga por retención (03:45) ───────────────────────────────────────
+cron.schedule('45 3 * * *', () => require('./privacy').purgeOld()
+  .then(r => { if (r.enabled) console.log('[retención] purga:', JSON.stringify(r.counts)); })
+  .catch(e => console.error('[retención] falló:', e.message)));
+
 // ─── Cron: refresco diario de URLs de la base de conocimiento ─────────────────
 cron.schedule('0 4 * * *', () => require('./knowledge').refreshDue().catch(e => console.error('[KB cron]', e.message)));
 

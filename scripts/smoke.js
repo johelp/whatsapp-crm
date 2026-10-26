@@ -35,7 +35,11 @@ const step = async (name, fn) => { try { await fn(); } catch (e) { log(false, na
 
   await step('health', async () => { const r = await http('GET', '/health'); log(r.status === 200 && r.json?.db === true, 'GET /health', `db=${r.json?.db} whatsapp=${r.json?.whatsapp}`); });
   await step('login incorrecto', async () => { const r = await http('POST', '/api/auth/login', { body: { username: USER, password: PASS + 'x' }, session: false }); log(r.status === 401, 'login con clave incorrecta rechazado', `HTTP ${r.status}`); cookie = ''; });
-  await step('login', async () => { const r = await http('POST', '/api/auth/login', { body: { username: USER, password: PASS } }); log(r.status === 200 && r.json?.ok, 'login correcto', `HTTP ${r.status}`); if (r.status !== 200) throw new Error('sin sesión, se corta'); });
+  await step('login', async () => { const r = await http('POST', '/api/auth/login', { body: { username: USER, password: PASS } }); log(r.status === 200 && r.json?.ok, 'login correcto', `HTTP ${r.status}`);
+    if (r.status !== 200) {
+      console.error(`\n⛔ No se pudo iniciar sesión (HTTP ${r.status}). Revisá SMOKE_USER y SMOKE_PASS: usá la contraseña real del admin, no un marcador como ***.${r.status === 429 ? ' (Demasiados intentos: esperá ~10 minutos.)' : ''}`);
+      process.exit(1);
+    } });
   await step('sesión', async () => { const r = await http('GET', '/api/auth/me'); log(r.status === 200 && r.json?.role, 'sesión activa', `rol=${r.json?.role}`); });
   await step('api sin sesión', async () => { const r = await http('GET', '/api/wa/status', { session: false }); log(r.status === 401, 'API protegida sin sesión', `HTTP ${r.status}`); });
 
@@ -52,6 +56,12 @@ const step = async (name, fn) => { try { await fn(); } catch (e) { log(false, na
     const u = await http('POST', '/api/knowledge/url/preview', { body: { url: 'http://127.0.0.1:1/' } }); log(u.status >= 400, 'bloquea URLs internas (SSRF)', `HTTP ${u.status}`);
   });
   await step('ia', async () => { const r = await http('GET', '/api/ai/usage'); log(r.status === 200 && r.json?.ok, 'consumo de IA', `tokens 30d=${r.json?.tokens}`); });
+  await step('privacidad', async () => {
+    const s = await http('GET', '/api/privacy/settings'); log(s.status === 200 && s.json?.ai_disclosure_text, 'ajustes de privacidad', `aviso de IA ${s.json?.ai_disclosure_enabled ? 'activo' : 'APAGADO'}, retención ${s.json?.retention_days} días`);
+    const f = await http('GET', '/api/privacy/subject?q=' + encodeURIComponent('+0000000000000')); log(f.status === 200 && f.json?.found === false, 'búsqueda de un titular inexistente');
+    const e = await http('POST', '/api/privacy/erase', { body: { q: '+0000000000000', confirm: 'otro' } }); log(e.status === 400, 'borrado exige confirmación del teléfono', `HTTP ${e.status}`);
+    const rt = await http('GET', '/api/privacy/retention/preview'); log(rt.status === 200 && rt.json?.ok, 'vista previa de retención');
+  });
   await step('anti-ban', async () => { const r = await http('GET', '/api/integrations/antiban'); log(r.status === 200 && r.json?.timezone, 'estado anti-bloqueo', `zona=${r.json?.timezone} pausado=${r.json?.paused}`); });
 
   await step('api key', async () => {

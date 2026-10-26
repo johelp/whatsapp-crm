@@ -192,6 +192,17 @@ async function _gate(meta, fn) {
     throw new GateError('BLOCKED', 'Destinatario en lista de bloqueo / No contactar');
   }
 
+  // Campañas = comunicación comercial: exigen consentimiento registrado (art. 21 LSSI / ePrivacy) salvo que el admin lo relaje;
+  // quien se dio de baja nunca recibe campañas.
+  if (kind === 'campaign' && !jid.endsWith('@g.us')) {
+    const privacy = require('./privacy');
+    const consent = await privacy.getConsent(jid);
+    if (consent === 'revoked') throw new GateError('BLOCKED', 'El contacto se dio de baja de las comunicaciones');
+    if (consent !== 'granted' && (await privacy.getPrivacy()).campaign_consent === 'require') {
+      throw new GateError('NO_CONSENT', 'Sin consentimiento registrado para comunicaciones comerciales (ver Configuración → Privacidad)');
+    }
+  }
+
   const cold = await isCold(jid);
   if (cold) {
     if (inQuietHours(cfg)) {

@@ -172,7 +172,7 @@ Devolvé JSON con esta forma exacta:
     }
     return result;
   } catch (e) {
-    console.error('[AI classify]', jid.split('@')[0], e.message);
+    console.error('[AI classify]', require('./redact').maskPhone(jid), e.message);
     return null;
   } finally { classifying.delete(jid); }
 }

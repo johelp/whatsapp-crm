@@ -26,6 +26,13 @@
       if (!el.hasAttribute('role')) { el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true'); }
     });
 
+    // Menú colapsado: cada ítem muestra su nombre como tooltip y para lectores de pantalla
+    root.querySelectorAll('.nav-item:not([title])').forEach(a => {
+      const t = a.querySelector('.nav-label')?.textContent.trim(); if (t) a.setAttribute('title', t);
+    });
+    const pill = root.querySelector('#wa-pill'), st = root.querySelector('#wa-status-text');
+    if (pill && st) { pill.setAttribute('title', 'WhatsApp: ' + st.textContent.trim()); pill.setAttribute('role', 'button'); pill.tabIndex = 0; }
+
     root.querySelectorAll('.field > label:not([for])').forEach(label => {
       const ctrl = label.parentElement.querySelector('input, select, textarea');
       if (!ctrl) return;

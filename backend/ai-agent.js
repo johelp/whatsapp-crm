@@ -15,6 +15,7 @@
 'use strict';
 
 const { query, queryOne } = require('./db');
+const { maskPhone } = require('./redact');
 
 // ─── Cache del system prompt (TTL: 5 min) ─────────────────────────────────────
 let _promptCache   = null;
@@ -159,7 +160,7 @@ async function maybeUpdateSummary(jid, config) {
         `UPDATE conversations SET ai_summary = ?, ai_summary_at = NOW() WHERE jid = ?`,
         [summary.substring(0, 500), jid]
       ).catch(() => {});
-      console.log(`[AI v2] Resumen: ${jid.split('@')[0]} → ${summary.substring(0,60)}...`);
+      console.log(`[AI v2] Resumen actualizado (${maskPhone(jid)})`);
     }
   } catch(e) { /* silencioso */ }
 }
@@ -167,6 +168,7 @@ async function maybeUpdateSummary(jid, config) {
 // ─── Detección de handoff ────────────────────────────────────────────────────
 
 const HANDOFF_RE = [
+  /^\s*(persona|humano|agente|asesor|operador|representante)\s*[.!¡?]*\s*$/i,   // la palabra sola, como anuncia el aviso de IA
   /hablar con (una persona|un humano|un agente|alguien)/i,
   /quiero hablar con/i,
   /me comunicás con/i,
@@ -352,7 +354,7 @@ async function _processForJid(jid, text, config, sendMessageFn) {
   try {
     // Handoff
     if (detectsHandoff(text)) {
-      console.log(`[AI v2] Handoff en ${jidShort}`);
+      console.log(`[AI v2] Handoff solicitado (${maskPhone(jid)})`);
       await query(`UPDATE conversations SET ai_disabled = 1 WHERE jid = ?`, [jid]).catch(() => {});
       // CRÍTICO: pasar el JID COMPLETO (con @lid, @s.whatsapp.net, etc.)
       // NO jidShort — si el contacto usa @lid, enviar al número causa "Esperando mensaje"
@@ -391,12 +393,19 @@ async function _processForJid(jid, text, config, sendMessageFn) {
     const tokensUsed  = result?.tokensUsed || 0;
 
     if (!responseText) {
-      console.warn(`[AI v2] Respuesta vacía para ${jidShort}`);
+      console.warn(`[AI v2] Respuesta vacía (${maskPhone(jid)})`);
       return false;
     }
 
+    // Reglamento de IA, art. 50(1): la primera respuesta de la IA en cada conversación informa que es una IA
+    const privacy = await require('./privacy').getPrivacy();
+    const conv = await queryOne('SELECT ai_disclosed FROM conversations WHERE jid = ?', [jid]);
+    const needsDisclosure = privacy.ai_disclosure_enabled && !Number(conv?.ai_disclosed);
+    const outText = needsDisclosure ? `${await require('./privacy').aiDisclosureText()}\n\n${responseText}` : responseText;
+
     // CRÍTICO: pasar JID completo, no solo el número
-    await sendMessageFn(jid, responseText, null);
+    await sendMessageFn(jid, outText, null);
+    if (needsDisclosure) await query('UPDATE conversations SET ai_disclosed = 1 WHERE jid = ?', [jid]).catch(() => {});
 
     // Métricas
     const elapsed = Date.now() - t0;
@@ -409,7 +418,7 @@ async function _processForJid(jid, text, config, sendMessageFn) {
     _metrics.by_jid[jidShort].tokens  += tokensUsed;
     _metrics.by_jid[jidShort].last_ms  = elapsed;
 
-    console.log(`[AI v2:${config.provider}] ${jidShort} → "${responseText.substring(0,60)}..." (${tokensUsed}tok, ${elapsed}ms)`);
+    console.log(`[AI v2:${config.provider}] respuesta enviada (${maskPhone(jid)}) · ${tokensUsed} tokens · ${elapsed}ms${needsDisclosure ? ' · con aviso de IA' : ''}`);
 
     // Resumen en background (no bloquea la respuesta)
     setImmediate(() => maybeUpdateSummary(jid, config).catch(() => {}));
@@ -418,7 +427,7 @@ async function _processForJid(jid, text, config, sendMessageFn) {
   } catch(e) {
     _metrics.errors++;
     if (_metrics.by_jid[jidShort]) _metrics.by_jid[jidShort].errors++;
-    console.error(`[AI v2] Error ${jidShort}:`, e.message);
+    console.error(`[AI v2] Error (${maskPhone(jid)}):`, e.message);
     return false;
   }
 }
@@ -507,6 +516,7 @@ function invalidatePromptCache() {
 
 module.exports = {
   runAIAgent,
+  _processForJid,
   getDocumentContext,
   callProvider,
   getUsageSummary, getLimits, saveLimits, getTokensToday,

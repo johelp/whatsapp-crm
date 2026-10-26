@@ -359,6 +359,7 @@
       <div class="field">
         <label>Agregar números (teléfono,nombre,extra — uno por línea)</label>
         <textarea class="input mono" id="c-contacts" rows="5" placeholder="5491123456789,Juan García,VIP&#10;34612345678,María López"></textarea>
+        <label class="note-pin-opt" style="margin-top:8px;align-items:flex-start;line-height:1.4"><input type="checkbox" id="c-consent-attest" style="margin-top:3px"> Declaro que estas personas dieron su consentimiento para recibir comunicaciones comerciales por WhatsApp (o tengo una relación previa que lo permite). Se registra con mi usuario.</label>
         <div style="display:flex;gap:8px;margin-top:6px;align-items:center;flex-wrap:wrap">
           <label class="btn-secondary btn-sm" for="c-csv-input" style="cursor:pointer">📎 Importar CSV</label>
           <input type="file" id="c-csv-input" accept=".csv" style="display:none" onchange="loadCampaignCSV(event)">
@@ -495,6 +496,15 @@
       </div>
       <div class="field"><label>Campo extra</label><input class="input" id="ct-extra" placeholder="Grupo, categoría, etc."></div>
       <div class="field"><label>Notas internas</label><textarea class="input" id="ct-notes" rows="2" placeholder="Notas privadas..."></textarea></div>
+      <div class="field">
+        <label for="ct-consent">Consentimiento para comunicaciones comerciales</label>
+        <select class="input" id="ct-consent">
+          <option value="unknown">Sin dato (no recibirá campañas)</option>
+          <option value="granted">Concedido</option>
+          <option value="revoked">Revocado / dado de baja</option>
+        </select>
+        <p class="field-hint" id="ct-consent-info">Las campañas solo se envían a quienes dieron su consentimiento. Quien responde BAJA queda como revocado.</p>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn-secondary" onclick="closeModal('modal-contact')">Cancelar</button>

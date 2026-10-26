@@ -71,7 +71,11 @@ async function runCampaign(campaignId, userId) {
     }
 
     const row = pending[i];
-    const text = personalize(campaign.template, row);
+    let text = personalize(campaign.template, row);
+    const priv = await require('./privacy').getPrivacy();
+    // Toda comunicación comercial debe permitir oponerse de forma sencilla (art. 21 LSSI): pie de baja
+    if (priv.campaign_footer_enabled && priv.campaign_footer_text) text += `\n\n${priv.campaign_footer_text}`;
+    let localReject = false;
 
     try {
       const cleanPhone = normalizePhone(row.phone);
@@ -134,13 +138,14 @@ async function runCampaign(campaignId, userId) {
         pausedByGuard = true;
         break;
       }
+      localReject = ['NO_CONSENT', 'BLOCKED', 'DUPLICATE'].includes(err.code);   // rechazo local: no hay envío que espaciar
       await query(
         "UPDATE campaign_contacts SET status = 'failed', error = ? WHERE id = ?",
         [err.message, row.id]
       );
       await query('UPDATE campaigns SET failed = failed + 1 WHERE id = ?', [campaignId]);
       failed++;
-      console.error(`❌ ${row.phone}: ${err.message}`);
+      console.error(`❌ envío fallido (${require('./redact').maskPhone(row.phone)}): ${err.message}`);
     }
 
     const progress = Math.round(((sent + failed) / pending.length) * 100);
@@ -152,7 +157,7 @@ async function runCampaign(campaignId, userId) {
 
     // ─── Anti-ban delays ───────────────────────────────────────────────
     const isLast = i === pending.length - 1;
-    if (!isLast && !cancelRequested) {
+    if (!isLast && !cancelRequested && !localReject) {
       if ((i + 1) % 5 === 0) {
         // Pausa larga cada 5 mensajes (45-90 segundos)
         const pauseSec = Math.floor(Math.random() * 45) + 45;

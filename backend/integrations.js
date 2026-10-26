@@ -146,7 +146,7 @@ async function processQueueOnce() {
         // No es culpa del mensaje: reprogramar sin consumir intentos
         await query("UPDATE outbound_queue SET status = 'pending', attempts = attempts - 1, send_after = ?, error = ? WHERE id = ?",
           [err.retryAt || Date.now() + 60000, err.message, item.id]);
-      } else if (['BLOCKED', 'DUPLICATE', 'NOT_ON_WHATSAPP'].includes(code) || attempts >= MAX_ATTEMPTS) {
+      } else if (['BLOCKED', 'DUPLICATE', 'NOT_ON_WHATSAPP', 'NO_CONSENT'].includes(code) || attempts >= MAX_ATTEMPTS) {
         await query("UPDATE outbound_queue SET status = 'failed', error = ? WHERE id = ?", [`${code || 'ERROR'}: ${err.message}`, item.id]);
         emit('message.failed', { queue_id: item.id, to: item.to_jid, event: item.event, error: err.message, code: code || 'ERROR' });
       } else {

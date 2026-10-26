@@ -27,6 +27,9 @@ Instancia de referencia: un proyecto de Railway (app + Postgres + volumen `/data
 - [ ] Cargar etiquetas, respuestas rápidas y horarios de atención (Configuración → Conversaciones / Automatización).
 - [ ] Decidir el historial: por defecto 30 días. Si el cliente no lo necesita, `HISTORY_DAYS=0`.
 - [ ] IA: elegir proveedor y API key **del cliente**, definir un **tope diario de tokens** (Configuración → IA) y cargar la base de conocimiento.
+- [ ] **Privacidad** (Configuración → Privacidad): aviso de IA activo y con el texto del cliente; política de consentimiento de campañas definida; plazo de **retención** decidido; pie de baja activo.
+- [ ] Región del proyecto en **EU West** si hay datos de la UE; DPA de Railway aceptado (ver `docs/legal/CUMPLIMIENTO_EUROPA.md` §7).
+- [ ] Probado un **borrado y una exportación** de un contacto de prueba.
 - [ ] Firmado el acuerdo de piloto (`docs/legal/ACUERDO_PILOTO.md`) con la aceptación expresa del riesgo del modo no oficial.
 - [ ] El cliente leyó la **Guía de uso seguro** (`/guia.html`).
 - [ ] Monitor externo creado sobre `/health` (ver §5).

@@ -142,7 +142,7 @@ router.get('/contacts', requireAuth, async (req, res) => {
 });
 
 router.post('/contacts', requireAuth, async (req, res) => {
-  const { phone, name, company, extra, notes } = req.body;
+  const { phone, name, company, extra, notes, consent_status, consent_source } = req.body;
   if (!phone) return res.status(400).json({ error: 'Telefono requerido' });
   const clean = normalizePhone(phone);
   try {
@@ -173,13 +173,18 @@ router.post('/contacts', requireAuth, async (req, res) => {
       [c.id, name, clean + '%', c.phone + '%']
     ).catch(() => {});
   }
+  if (consent_status) await require('../privacy').setConsent(clean, consent_status, consent_source || 'manual', { userId: req.session.user.id, evidence: `registrado por el operador ${req.session.user.display_name}` });
   res.json(c);
 });
 
 router.put('/contacts/:id', requireAuth, async (req, res) => {
-  const { name, company, extra, notes } = req.body;
+  const { name, company, extra, notes, consent_status, consent_source } = req.body;
   await query('UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = NOW() WHERE id = ?',
     [name, company, extra, notes, req.params.id]);
+  if (consent_status) {
+    const c = await queryOne('SELECT phone FROM contacts WHERE id = ?', [req.params.id]);
+    if (c) await require('../privacy').setConsent(c.phone, consent_status, consent_source || 'manual', { userId: req.session.user.id, evidence: `registrado por el operador ${req.session.user.display_name}` });
+  }
   // Actualizar wa_push_name en conversaciones de este contacto
   if (name) {
     await query(
@@ -251,6 +256,7 @@ router.delete('/contacts/:id/labels/:labelId', requireAuth, async (req, res) => 
 router.post('/contacts/import', requireAuth, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Sin archivo' });
   let imported = 0, skipped = 0;
+  const importedPhones = [];
   const rows = [];
   await new Promise(resolve => {
     fs.createReadStream(req.file.path).pipe(csvParser()).on('data', row => rows.push(row)).on('end', resolve);
@@ -261,11 +267,14 @@ router.post('/contacts/import', requireAuth, upload.single('file'), async (req, 
     if (phone.length >= 7) {
       await query('INSERT OR IGNORE INTO contacts (phone, name, company, extra) VALUES (?, ?, ?, ?)',
         [phone, row.name || row.nombre || '', row.company || row.empresa || '', row.extra || row.campo || '']);
+      importedPhones.push(phone);
       imported++;
     } else skipped++;
   }
   fs.unlinkSync(req.file.path);
-  res.json({ imported, skipped });
+  // Solo si el operador declara que tiene el consentimiento de estas personas (art. 21 LSSI / ePrivacy)
+  const attested = /^(1|true|on)$/i.test(String(req.body.consent_attest || '')) ? await require('../privacy').attestConsent(importedPhones, 'import_csv_declared', req.session.user.id) : 0;
+  res.json({ imported, skipped, consent_declared: attested });
 });
 
 // ─── Labels ───────────────────────────────────────────────────────────────────
@@ -552,8 +561,9 @@ router.get('/campaigns', requireAuth, async (req, res) => {
 });
 
 router.post('/campaigns', requireAuth, async (req, res) => {
-  const { name, type, template, delay_min, delay_max, scheduled_at, contacts: contactList } = req.body;
+  const { name, type, template, delay_min, delay_max, scheduled_at, contacts: contactList, consent_attest } = req.body;
   if (!name || !template) return res.status(400).json({ error: 'name y template requeridos' });
+  const attestPhones = [];
 
   const rows = await query(
     'INSERT INTO campaigns (name, type, template, delay_min, delay_max, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
@@ -570,7 +580,9 @@ router.post('/campaigns', requireAuth, async (req, res) => {
         'INSERT INTO campaign_contacts (campaign_id, contact_id, phone, name, extra_field) VALUES (?, ?, ?, ?, ?)',
         [campaignId, existing?.id || null, phone, c.name || '', c.extra || '']
       );
+      attestPhones.push(phone);
     }
+    if (consent_attest) await require('../privacy').attestConsent(attestPhones, 'campaign_list_declared', req.session.user.id);
     const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [campaignId]);
     await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, campaignId]);
   }
@@ -600,9 +612,10 @@ router.delete('/campaigns/:id', requireAuth, async (req, res) => {
 });
 
 router.post('/campaigns/:id/contacts/add', requireAuth, async (req, res) => {
-  const { contacts } = req.body;
+  const { contacts, consent_attest } = req.body;
   if (!Array.isArray(contacts) || !contacts.length) return res.status(400).json({ error: 'contacts requerido' });
   let added = 0;
+  const attestPhones = [];
   for (const c of contacts) {
     const phone = normalizePhone(c.phone || '');
     if (phone.length < 7) continue;
@@ -614,8 +627,10 @@ router.post('/campaigns/:id/contacts/add', requireAuth, async (req, res) => {
       'INSERT INTO campaign_contacts (campaign_id, contact_id, phone, name, extra_field) VALUES (?, ?, ?, ?, ?)',
       [req.params.id, contact?.id || null, phone, c.name || '', c.extra || '']
     );
+    attestPhones.push(phone);
     added++;
   }
+  if (consent_attest) await require('../privacy').attestConsent(attestPhones, 'campaign_list_declared', req.session.user.id);
   const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [req.params.id]);
   await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, req.params.id]);
   res.json({ added, total: cnt?.n || 0 });
@@ -689,15 +704,18 @@ router.post('/campaigns/:id/import', requireAuth, upload.single('file'), async (
     fs.createReadStream(req.file.path).pipe(csvParser()).on('data', row => rows.push(row)).on('end', resolve);
   });
   let count = 0;
+  const attestPhones = [];
   for (const row of rows) {
     const raw = row.phone || row.telefono || row.numero || Object.values(row)[0] || '';
     const phone = normalizePhone(raw);
     if (phone.length >= 7) {
       await query('INSERT INTO campaign_contacts (campaign_id, phone, name, extra_field) VALUES (?, ?, ?, ?)',
         [req.params.id, phone, row.name || row.nombre || '', row.extra || row.campo || '']);
+      attestPhones.push(phone);
       count++;
     }
   }
+  if (/^(1|true|on)$/i.test(String(req.body.consent_attest || ''))) await require('../privacy').attestConsent(attestPhones, 'campaign_csv_declared', req.session.user.id);
   const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [req.params.id]);
   await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, req.params.id]);
   fs.unlinkSync(req.file.path);
@@ -970,6 +988,43 @@ router.get('/ai/metrics', requireAuth, requireAdmin, async (req, res) => {
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── Privacidad: ajustes, derechos de los interesados (RGPD) y retención (solo admin) ───
+router.get('/privacy/settings', requireAuth, requireAdmin, async (req, res) => res.json(await require('../privacy').getPrivacy(true)));
+router.put('/privacy/settings', requireAuth, requireAdmin, async (req, res) => res.json(await require('../privacy').savePrivacy(req.body || {})));
+
+router.get('/privacy/subject', requireAuth, requireAdmin, async (req, res) => {
+  try { res.json({ ok: true, ...(await require('../dsr').summarize(req.query.q)) }); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+router.get('/privacy/export', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const out = await require('../dsr').exportSubject(req.query.q);
+    res.setHeader('Content-Disposition', `attachment; filename="datos-${Date.now()}.json"`);
+    res.json(out);
+  } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+router.post('/privacy/erase', requireAuth, requireAdmin, async (req, res) => {
+  const { q, confirm } = req.body || {};
+  if (!confirm || String(confirm).replace(/\D/g, '') !== String(q || '').replace(/\D/g, '')) {
+    return res.status(400).json({ error: 'Para confirmar, repetí el teléfono exactamente en el campo de confirmación' });
+  }
+  try { res.json(await require('../dsr').eraseSubject(q, { userId: req.session.user.id })); }
+  catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+router.get('/privacy/erasure-log', requireAuth, requireAdmin, async (req, res) => res.json({ ok: true, log: await require('../dsr').erasureLog() }));
+router.get('/privacy/retention/preview', requireAuth, requireAdmin, async (req, res) => res.json({ ok: true, ...(await require('../privacy').purgeOld({ dryRun: true })) }));
+router.post('/privacy/retention/run', requireAuth, requireAdmin, async (req, res) => res.json({ ok: true, ...(await require('../privacy').purgeOld()) }));
+
+// Antes de iniciar una campaña: cuántos contactos quedarán fuera por falta de consentimiento
+router.get('/campaigns/:id/consent-check', requireAuth, async (req, res) => {
+  const privacy = require('../privacy'), policy = (await privacy.getPrivacy()).campaign_consent;
+  const rows = await query("SELECT phone FROM campaign_contacts WHERE campaign_id = ? AND status = 'pending'", [req.params.id]);
+  const out = { total: rows.length, granted: 0, unknown: 0, revoked: 0, policy };
+  for (const r of rows) out[await privacy.getConsent(r.phone)]++;
+  out.will_skip = out.revoked + (policy === 'require' ? out.unknown : 0);
+  res.json({ ok: true, ...out });
 });
 
 // ─── Respaldos de la base (solo admin) ───────────────────────────────────────
@@ -1363,7 +1418,7 @@ router.post('/system/seed-messages', requireAuth, requireAdmin, async (req, res)
         inserted++;
       } catch(e) {
         errors++;
-        console.error('[seed] error:', e.message, '| ts:', ts, '| jid:', c.jid);
+        console.error('[seed] error:', e.message);
       }
     }
 
