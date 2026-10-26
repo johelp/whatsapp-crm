@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WhatsFlow — Atención multiagente de WhatsApp, IA e integraciones</title>
+<meta name="description" content="CRM de WhatsApp para equipos: bandeja multiagente, IA que transcribe y clasifica, API para tus sistemas y dos formas de conectar: sin API oficial o con la API de Meta.">
+<style>
+  :root {
+    --bg: #f8fafc; --surface: #ffffff; --surface2: #f1f5f9; --border: #e2e8f0;
+    --text: #0f172a; --text2: #475569; --text3: #5b6b82;
+    --wa: #15803d; --wa-strong: #166534; --wa-light: #dcfce7; --accent: #4f46e5;
+    --amber: #92400e; --amber-light: #fef3c7; --radius: 14px;
+    --shadow: 0 10px 30px rgba(15, 23, 42, .08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0b1220; --surface: #121c2e; --surface2: #1a2740; --border: #27354f;
+      --text: #f1f5f9; --text2: #cbd5e1; --text3: #94a3b8;
+      --wa: #4ade80; --wa-strong: #86efac; --wa-light: #123524; --accent: #a5b4fc;
+      --amber: #fcd34d; --amber-light: #3a2a0b; --shadow: 0 10px 30px rgba(0, 0, 0, .35);
+    }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 72px 0; }
+  h1, h2, h3 { line-height: 1.2; margin: 0 0 12px; letter-spacing: -.02em; }
+  h1 { font-size: clamp(2rem, 5vw, 3.2rem); }
+  h2 { font-size: clamp(1.6rem, 3.4vw, 2.2rem); }
+  h3 { font-size: 1.1rem; }
+  p { margin: 0 0 12px; color: var(--text2); }
+  .eyebrow { font-size: .8rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--wa-strong); margin-bottom: 10px; }
+  .lead { font-size: 1.15rem; max-width: 62ch; }
+  .center { text-align: center; } .center .lead { margin-inline: auto; }
+
+  nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(10px); border-bottom: 1px solid var(--border); }
+  nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 62px; gap: 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; text-decoration: none; }
+  .logo { width: 30px; height: 30px; border-radius: 9px; background: var(--wa); display: grid; place-items: center; }
+  .logo svg { width: 18px; height: 18px; stroke: #fff; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  nav ul { display: flex; gap: 22px; list-style: none; margin: 0; padding: 0; }
+  nav ul a { text-decoration: none; font-size: .92rem; color: var(--text2); }
+  nav ul a:hover { color: var(--text); }
+  @media (max-width: 760px) { nav ul { display: none; } }
+
+  .btn { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 0 22px; border-radius: 12px; font-weight: 600; text-decoration: none; border: 1.5px solid transparent; cursor: pointer; transition: background .15s, border-color .15s, transform .15s; }
+  .btn-primary { background: var(--wa-strong); color: #fff; }
+  @media (prefers-color-scheme: dark) { .btn-primary { background: var(--wa); color: #06260f; } }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-ghost { border-color: var(--border); background: var(--surface); }
+  .btn-ghost:hover { border-color: var(--text3); }
+  .cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 26px; }
+  .center .cta-row { justify-content: center; }
+
+  .hero { padding-top: 64px; }
+  .hero-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 40px; align-items: center; }
+  @media (max-width: 880px) { .hero-grid { grid-template-columns: 1fr; } }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+  .badge { font-size: .8rem; font-weight: 600; padding: 4px 12px; border-radius: 99px; background: var(--surface2); border: 1px solid var(--border); color: var(--text2); }
+
+  /* Maqueta de la bandeja */
+  .mock { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; box-shadow: var(--shadow); overflow: hidden; }
+  .mock-bar { display: flex; gap: 6px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface2); }
+  .mock-bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--border); display: block; }
+  .mock-body { display: grid; grid-template-columns: 150px 1fr; min-height: 290px; }
+  .mock-list { border-right: 1px solid var(--border); padding: 8px; display: grid; gap: 4px; align-content: start; }
+  .mock-item { padding: 8px 10px; border-radius: 10px; font-size: .78rem; }
+  .mock-item b { display: block; color: var(--text); font-size: .82rem; }
+  .mock-item span { color: var(--text3); }
+  .mock-item.on { background: var(--wa-light); }
+  .chip { display: inline-block; font-size: .66rem; font-weight: 700; padding: 1px 7px; border-radius: 99px; margin-top: 4px; background: var(--amber-light); color: var(--amber); }
+  .mock-chat { padding: 12px; display: flex; flex-direction: column; gap: 8px; font-size: .82rem; }
+  .note-pin { background: var(--amber-light); color: var(--amber); border-radius: 8px; padding: 6px 10px; font-size: .74rem; font-weight: 600; }
+  .bub { max-width: 82%; padding: 8px 12px; border-radius: 12px; background: var(--surface2); color: var(--text); }
+  .bub.me { align-self: flex-end; background: var(--wa-light); }
+  .bub small { display: block; color: var(--text3); font-size: .68rem; margin-top: 2px; }
+  @media (max-width: 440px) { .mock-body { grid-template-columns: 1fr; } .mock-list { display: none; } }
+
+  .grid { display: grid; gap: 18px; }
+  .g3 { grid-template-columns: repeat(3, 1fr); } .g2 { grid-template-columns: repeat(2, 1fr); }
+  @media (max-width: 900px) { .g3 { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 620px) { .g3, .g2 { grid-template-columns: 1fr; } }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px; }
+  .card p { margin: 0; font-size: .95rem; }
+  .ico { width: 40px; height: 40px; border-radius: 11px; background: var(--wa-light); display: grid; place-items: center; margin-bottom: 14px; }
+  .ico svg { width: 20px; height: 20px; stroke: var(--wa-strong); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  @media (prefers-color-scheme: dark) { .ico svg { stroke: var(--wa); } }
+  .alt { background: var(--surface2); }
+
+  /* Conexión */
+  .mode { position: relative; display: flex; flex-direction: column; gap: 10px; }
+  .mode h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .tag { font-size: .7rem; font-weight: 700; padding: 3px 10px; border-radius: 99px; letter-spacing: .03em; }
+  .tag.ok { background: var(--wa-light); color: var(--wa-strong); }
+  .tag.soon { background: var(--amber-light); color: var(--amber); }
+  @media (prefers-color-scheme: dark) { .tag.ok { color: var(--wa); } }
+  .mode ul { margin: 0; padding-left: 18px; color: var(--text2); font-size: .92rem; display: grid; gap: 6px; }
+  .mode .when { margin-top: auto; font-size: .85rem; color: var(--text3); border-top: 1px dashed var(--border); padding-top: 10px; }
+  .table-wrap { overflow-x: auto; margin-top: 28px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 640px; font-size: .9rem; }
+  th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--surface2); font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text3); }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { font-weight: 600; color: var(--text); }
+  .callout { margin-top: 22px; padding: 16px 18px; border-radius: var(--radius); background: var(--amber-light); color: var(--amber); font-size: .92rem; }
+  .callout b { color: inherit; }
+
+  pre { margin: 0; padding: 18px; border-radius: var(--radius); background: #0b1220; color: #e2e8f0; overflow-x: auto; font: .82rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre .k { color: #86efac; } pre .s { color: #fcd34d; } pre .c { color: #94a3b8; }
+  .steps { counter-reset: s; display: grid; gap: 14px; }
+  .step { display: flex; gap: 14px; align-items: flex-start; }
+  .step::before { counter-increment: s; content: counter(s); flex: none; width: 30px; height: 30px; border-radius: 50%; background: var(--wa-strong); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: .9rem; }
+  @media (prefers-color-scheme: dark) { .step::before { background: var(--wa); color: #06260f; } }
+  .step p { margin: 0; }
+  .step b { color: var(--text); }
+
+  details { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 18px; }
+  details + details { margin-top: 10px; }
+  summary { cursor: pointer; font-weight: 600; }
+  details p { margin: 10px 0 0; }
+  .final { background: var(--wa-strong); border-radius: 22px; padding: 48px 24px; color: #fff; }
+  .final p, .final h2 { color: #fff; }
+  .final .btn-primary { background: #fff; color: #14532d; }
+  .final .btn-ghost { background: transparent; color: #fff; border-color: rgba(255,255,255,.55); }
+  footer { padding: 30px 0 50px; color: var(--text3); font-size: .85rem; text-align: center; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+
+<nav aria-label="Principal">
+  <div class="wrap">
+    <a class="brand" href="#top"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span> WhatsFlow</a>
+    <ul>
+      <li><a href="#conexion">Conexión</a></li>
+      <li><a href="#funciones">Funciones</a></li>
+      <li><a href="#ia">IA</a></li>
+      <li><a href="#integraciones">Integraciones</a></li>
+      <li><a href="#faq">Preguntas</a></li>
+    </ul>
+    <a class="btn btn-primary" href="#contacto" style="min-height:40px;padding:0 16px">Pedir demo</a>
+  </div>
+</nav>
+
+<main id="top">
+<!-- HERO -->
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <p class="eyebrow">CRM de WhatsApp para equipos</p>
+      <h1>Todo tu equipo atendiendo desde un solo WhatsApp.</h1>
+      <p class="lead">Bandeja multiagente con asignación, notas internas y etiquetas. IA que transcribe audios, clasifica consultas y responde con tu base de conocimiento. Y una API para que tus sistemas avisen por WhatsApp cuando algo pasa.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="#contacto">Pedir una demo</a>
+        <a class="btn btn-ghost" href="#conexion">Ver formas de conexión</a>
+      </div>
+      <div class="badges" aria-label="Formas de conexión">
+        <span class="badge">Sin API oficial · disponible hoy</span>
+        <span class="badge">API oficial de Meta · próximamente</span>
+        <span class="badge">Coexistence · próximamente</span>
+        <span class="badge">Marca blanca</span>
+      </div>
+    </div>
+
+    <div class="mock" role="img" aria-label="Vista de ejemplo de la bandeja de conversaciones con una nota fijada y etiquetas de prioridad">
+      <div class="mock-bar"><i></i><i></i><i></i></div>
+      <div class="mock-body">
+        <div class="mock-list">
+          <div class="mock-item on"><b>Marta Giménez</b><span>¿Cuánto sale la clase…?</span></div>
+          <div class="mock-item"><b>Lucas Romano</b><span>🎤 Necesito cambiar la reserva</span><span class="chip">Alta</span></div>
+          <div class="mock-item"><b>Ana Petrova</b><span>Gracias, perfecto</span></div>
+        </div>
+        <div class="mock-chat">
+          <div class="note-pin">📌 Cliente VIP · prefiere mañanas · alérgica al látex</div>
+          <div class="bub">Hola, ¿cuánto sale la clase privada?</div>
+          <div class="bub me">¡Hola Marta! Son 45 € por hora. ¿Para qué día?<small>Operador: Sofía</small></div>
+          <div class="bub">Para el sábado, gracias 🙌</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CONEXIÓN -->
+<section id="conexion" class="alt">
+  <div class="wrap">
+    <div class="center">
+      <p class="eyebrow">Formas de conexión</p>
+      <h2>Elegís cómo conectar WhatsApp. Podés cambiar cuando crezcas.</h2>
+      <p class="lead">El CRM está pensado para empezar rápido y “formalizarse” después, sin migrar de sistema: la misma bandeja, las mismas conversaciones y las mismas integraciones.</p>
+    </div>
+
+    <div class="grid g3" style="margin-top:36px">
+      <article class="card mode">
+        <h3>Sin API oficial <span class="tag ok">Disponible hoy</span></h3>
+        <p>Vinculás el número escaneando un QR, como un WhatsApp Web, y empezás a atender en minutos.</p>
+        <ul>
+          <li>Funciona con tu número y tu app actual</li>
+          <li>Sin plantillas ni aprobación previa</li>
+          <li>Sin costo por conversación de Meta</li>
+          <li>Protecciones anti-bloqueo integradas</li>
+        </ul>
+        <p class="when"><b>Ideal para:</b> empezar, validar y equipos chicos o medianos. Al no ser el canal oficial, tiene más riesgo de bloqueo que la API de Meta.</p>
+      </article>
+
+      <article class="card mode">
+        <h3>API oficial de Meta <span class="tag soon">Próximamente</span></h3>
+        <p>Conexión por la WhatsApp Business Platform (Cloud API), el canal oficial de Meta.</p>
+        <ul>
+          <li>Canal homologado, el más estable a escala</li>
+          <li>Plantillas aprobadas para escribir primero</li>
+          <li>Números verificados y métricas de calidad</li>
+          <li>Pensado para alto volumen y campañas</li>
+        </ul>
+        <p class="when"><b>Ideal para:</b> empresas que escalan o necesitan cumplimiento formal. Requiere alta en Meta y tiene costo por conversación.</p>
+      </article>
+
+      <article class="card mode">
+        <h3>Coexistence <span class="tag soon">Próximamente</span></h3>
+        <p>Usás la API oficial <em>y</em> seguís con la app WhatsApp Business en el celular, sobre el mismo número.</p>
+        <ul>
+          <li>Atención desde el CRM y desde el teléfono</li>
+          <li>Conserva el número y el historial de la app</li>
+          <li>Camino natural para pasar a lo oficial sin cortes</li>
+        </ul>
+        <p class="when"><b>Ideal para:</b> negocios que ya atienden con la app Business y quieren sumar equipo y automatización.</p>
+      </article>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>&nbsp;</th><th>Sin API oficial</th><th>API oficial (Meta)</th><th>Coexistence</th></tr></thead>
+        <tbody>
+          <tr><td>Estado en este CRM</td><td>Disponible</td><td>Próximamente</td><td>Próximamente</td></tr>
+          <tr><td>Puesta en marcha</td><td>Minutos, con QR</td><td>Alta y verificación en Meta</td><td>Alta en Meta + vinculación</td></tr>
+          <tr><td>Escribir primero a un cliente</td><td>Libre (con límites anti-bloqueo)</td><td>Con plantillas aprobadas</td><td>Con plantillas aprobadas</td></tr>
+          <tr><td>Costo de Meta</td><td>Ninguno</td><td>Por conversación</td><td>Por conversación</td></tr>
+          <tr><td>Riesgo de bloqueo</td><td>Mayor: canal no oficial</td><td>Bajo: canal oficial</td><td>Bajo: canal oficial</td></tr>
+          <tr><td>Seguís usando el celular</td><td>Sí, como dispositivo vinculado</td><td>No con el mismo número</td><td>Sí</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="callout"><b>Sin letra chica:</b> ninguna herramienta puede garantizar que un número no se bloquee. En modo sin API oficial reducimos el riesgo con límites, pausas y buenas prácticas, pero el canal oficial siempre es el más seguro. Por eso la conexión es intercambiable.</p>
+  </div>
+</section>
+
+<!-- FUNCIONES -->
+<section id="funciones">
+  <div class="wrap">
+    <div class="center">
+      <p class="eyebrow">Para tu equipo</p>
+      <h2>Una bandeja pensada para responder rápido y sin pisarse.</h2>
+    </div>
+    <div class="grid g3" style="margin-top:34px">
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg></div><h3>Multiagente</h3><p>Varios operadores en el mismo número, con asignación manual o automática, estados de conversación y aviso de quién está viendo cada chat.</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg></div><h3>Notas internas por cliente</h3><p>Anotá lo que el próximo operador debe saber. Las notas fijadas aparecen sobre el chat y el cliente nunca las ve.</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24"><path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><circle cx="7" cy="7" r="1.2"/></svg></div><h3>Etiquetas y respuestas rápidas</h3><p>Ordená consultas por tema y respondé en un toque con plantillas y una biblioteca de archivos (PDF, imágenes) lista para enviar.</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24"><path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg></div><h3>Campañas con protección</h3><p>Envíos masivos con personalización, variación de texto, baja automática (“STOP”) y límites que cuidan la reputación de tu número.</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div><h3>Anti-bloqueo</h3><p>Cola de envío con intervalos naturales, topes distintos para contactos nuevos, horario silencioso, pausa automática ante señales de riesgo y lista de bloqueo.</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div><h3>Horarios y respuesta automática</h3><p>Fuera de horario, un bot saluda y recoge nombre, email y motivo para que tu equipo retome al día siguiente.</p></article>
+    </div>
+  </div>
+</section>
+
+<!-- IA -->
+<section id="ia" class="alt">
+  <div class="wrap">
+    <div class="center">
+      <p class="eyebrow">Inteligencia artificial</p>
+      <h2>La IA hace el trabajo repetitivo. Tu equipo, el que importa.</h2>
+      <p class="lead">Elegís tu proveedor (OpenAI, Anthropic, Gemini o Groq) con tu propia API key. Cada función se activa por separado.</p>
+    </div>
+    <div class="grid g2" style="margin-top:34px">
+      <article class="card"><h3>🎤 Transcripción de audios</h3><p>Los audios entrantes se convierten en texto: se leen de un vistazo, se pueden buscar y la IA los entiende.</p></article>
+      <article class="card"><h3>🗂 Clasificación automática</h3><p>Detecta la intención, la prioridad y el estado de ánimo del cliente, y aplica tus etiquetas. Los casos urgentes o molestos se destacan en la bandeja.</p></article>
+      <article class="card"><h3>👤 Asignación inteligente</h3><p>Reparte conversaciones por carga de trabajo, por turnos o según la etiqueta, y deriva a una persona cuando el cliente la pide.</p></article>
+      <article class="card"><h3>🧠 Base de conocimiento</h3><p>Cargá notas día a día, archivos o <b>pegá una URL</b>: el sistema lee la página, la limpia y la guarda. La IA responde solo con lo que vos le cargaste, y no inventa.</p></article>
+    </div>
+  </div>
+</section>
+
+<!-- INTEGRACIONES -->
+<section id="integraciones">
+  <div class="wrap">
+    <div class="grid g2" style="align-items:center;gap:40px">
+      <div>
+        <p class="eyebrow">Integraciones</p>
+        <h2>Tu sistema avisa. WhatsApp entrega.</h2>
+        <p class="lead">Una API simple para que tu tienda, tu plugin o tu ERP envíen mensajes cuando ocurre algo: una nueva orden, un pago, una reserva.</p>
+        <ul style="color:var(--text2);padding-left:18px;display:grid;gap:6px;margin:16px 0 0">
+          <li>Plantillas con variables y destinatarios por evento (personas o grupos)</li>
+          <li>Cola persistente con reintentos y sin duplicados</li>
+          <li>Webhooks firmados cuando entra un mensaje</li>
+          <li>Claves de API por sistema, revocables en cualquier momento</li>
+        </ul>
+      </div>
+<pre aria-label="Ejemplo de llamada a la API"><span class="c"># Nueva orden en tu tienda → aviso al equipo</span>
+curl -X POST https://tu-crm/api/v1/notify \
+  -H <span class="s">"Authorization: Bearer wak_…"</span> \
+  -H <span class="s">"Idempotency-Key: order-1001"</span> \
+  -d <span class="s">'{
+    "event": "new_order",
+    "data": {
+      "id": 1001,
+      "customer": { "name": "Ana" },
+      "total": "120.00 EUR"
+    }
+  }'</span>
+
+<span class="c"># → 202 Accepted: en cola, con reintentos</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- CÓMO EMPEZAR -->
+<section class="alt">
+  <div class="wrap">
+    <div class="center"><p class="eyebrow">Cómo empezar</p><h2>De cero a atender en una tarde.</h2></div>
+    <div class="steps" style="max-width:700px;margin:34px auto 0">
+      <div class="step"><p><b>Instalamos tu panel</b> con tu marca, tu dominio y tus usuarios.</p></div>
+      <div class="step"><p><b>Conectás tu número.</b> Hoy, escaneando un QR. Cuando lo necesites, pasás a la API oficial.</p></div>
+      <div class="step"><p><b>Cargás tu conocimiento</b> (notas, archivos o una URL) y activás la IA que quieras.</p></div>
+      <div class="step"><p><b>Conectás tus sistemas</b> con una API key y empezás a recibir avisos en WhatsApp.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section id="faq">
+  <div class="wrap" style="max-width:760px">
+    <div class="center"><p class="eyebrow">Preguntas frecuentes</p><h2>Lo que más nos preguntan</h2></div>
+    <div style="margin-top:30px">
+      <details><summary>¿Necesito la API oficial de Meta para empezar?</summary><p>No. Hoy podés conectar tu número con un QR, sin trámites. La API oficial y Coexistence están en camino para cuando necesites escalar o formalizar.</p></details>
+      <details><summary>¿Me pueden bloquear el número?</summary><p>En el modo sin API oficial existe ese riesgo, como con cualquier herramienta no oficial. Lo reducimos con límites de envío, pausas automáticas y baja de contactos, pero no se puede garantizar. Para volúmenes altos recomendamos la API oficial.</p></details>
+      <details><summary>¿Puedo seguir usando WhatsApp en el celular?</summary><p>Sí. En el modo QR el CRM funciona como un dispositivo vinculado. Con Coexistence (próximamente) también podrás usar la app Business sobre el mismo número.</p></details>
+      <details><summary>¿Es marca blanca?</summary><p>Sí. Podés ofrecerlo con tu nombre y tu dominio. Cada instalación es independiente.</p></details>
+      <details><summary>¿Qué pasa con mis datos y mis API keys de IA?</summary><p>El sistema se despliega en tu propio servidor y base de datos. Las claves de IA son tuyas y se usan solo para las funciones que actives.</p></details>
+      <details><summary>¿Cuánto cuesta?</summary><p>Escribinos y armamos una propuesta según el tamaño de tu equipo y la forma de conexión.</p></details>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section id="contacto" style="padding-top:20px">
+  <div class="wrap">
+    <div class="final center">
+      <h2>Veamos tu caso en una demo.</h2>
+      <p class="lead" style="max-width:52ch;margin-inline:auto">Te mostramos el panel funcionando y definimos la mejor forma de conexión para tu volumen.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="mailto:contacto@tudominio.com">Pedir demo</a>
+        <a class="btn btn-ghost" href="https://wa.me/0000000000">Escribir por WhatsApp</a>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer><div class="wrap">© WhatsFlow · WhatsApp es una marca de Meta Platforms, Inc. Este producto no está afiliado ni respaldado por Meta.</div></footer>
+</body>
+</html>

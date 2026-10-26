@@ -434,6 +434,7 @@ async function seedData() {
 
   const bcrypt = require('bcryptjs');
   // Contraseña inicial: ADMIN_PASSWORD o una aleatoria que se muestra UNA vez en el log.
+  const BRAND = process.env.APP_NAME || 'WhatsFlow';
   const initialPassword = process.env.ADMIN_PASSWORD || require('crypto').randomBytes(9).toString('base64url');
   const hash = await bcrypt.hash(initialPassword, 10);
 
@@ -457,9 +458,9 @@ async function seedData() {
   }
 
   const qrs = [
-    ['Bienvenida',       '/hola',        'saludos',  'Hola {{nombre}}! Bienvenido/a a Snow Motion. En que podemos ayudarte?'],
+    ['Bienvenida',       '/hola',        'saludos',  `Hola {{nombre}}! Bienvenido/a a ${BRAND}. En que podemos ayudarte?`],
     ['Horarios clases',  '/horarios',    'info',     'Nuestras clases son Lun-Vie 9:00-17:00 y fines de semana 8:00-16:00.'],
-    ['Solicitar resena', '/resena',      'resenas',  'Hola {{nombre}}! Fue un placer tenerte en Snow Motion. Podrias dejarnos una resena? [LINK]'],
+    ['Solicitar resena', '/resena',      'resenas',  `Hola {{nombre}}! Fue un placer tenerte en ${BRAND}. Podrias dejarnos una resena? [LINK]`],
     ['Envio presupuesto','/presupuesto', 'ventas',   'Hola {{nombre}}! Te enviamos el presupuesto solicitado. Cualquier consulta avisanos.'],
     ['Confirmar reserva','/confirmar',   'reservas', 'Perfecto {{nombre}}! Tu reserva quedo confirmada. Te esperamos!'],
   ];
@@ -470,7 +471,7 @@ async function seedData() {
   await query(
     'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, greeting_message, collect_fields) VALUES (?, ?, ?, ?, ?)',
     [0, '09:00', '18:00',
-     'Hola! Gracias por escribirnos a Snow Motion.\n\nEstamos fuera del horario de atencion (Lun-Vie 9:00-18:00).\n\nPara ayudarte mejor te hacemos unas preguntas rapidas:',
+     `Hola! Gracias por escribirnos a ${BRAND}.\n\nEstamos fuera del horario de atencion (Lun-Vie 9:00-18:00).\n\nPara ayudarte mejor te hacemos unas preguntas rapidas:`,
      '["name","email","phone","reason"]']
   );
 

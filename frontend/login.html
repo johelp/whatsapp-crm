@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WhatsApp CRM — Acceso</title>
+<title>WhatsFlow — Acceso</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -175,7 +175,7 @@
 <div class="card">
   <div class="logo-area">
     <div class="logo-icon">💬</div>
-    <h1 id="app-title">WhatsApp CRM</h1>
+    <h1 id="app-title" data-brand>WhatsFlow</h1>
     <p class="subtitle">Acceso al panel de agentes</p>
   </div>
 
@@ -195,7 +195,7 @@
     <span id="btn-text">Ingresar</span>
   </button>
 
-  <p class="footer-note">Snow Motion · Panel interno</p>
+  <p class="footer-note"><span data-brand>WhatsFlow</span> · Panel de atención</p>
 </div>
 
 <script>
@@ -243,6 +243,15 @@ fetch('/api/auth/me').then(r => {
       document.getElementById('btn-text').textContent = 'Ingresar';
     }
   }
+</script>
+<script>
+  // Marca blanca: reemplaza "WhatsFlow" por APP_NAME de esta instalación
+  fetch('/api/brand').then(r => r.json()).then(b => {
+    if (!b.name) return;
+    window.APP_BRAND = b.name;
+    document.querySelectorAll('[data-brand]').forEach(e => e.textContent = b.name);
+    document.title = document.title.replace('WhatsFlow', b.name);
+  }).catch(() => {});
 </script>
 </body>
 </html>

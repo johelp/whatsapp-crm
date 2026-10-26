@@ -48,6 +48,7 @@ const io = new Server(httpServer, {
 });
 
 const PORT = process.env.PORT || 3000;
+const APP_NAME = process.env.APP_NAME || 'WhatsFlow';
 if (IS_PROD && !process.env.SESSION_SECRET) {
   console.error('FATAL: definí SESSION_SECRET en producción');
   process.exit(1);
@@ -108,6 +109,8 @@ app.get('/login', (req, res) => {
 
 // ─── API (todas las rutas, auth se maneja dentro de api.js) ───────────────────
 
+// Marca blanca: el nombre se define por instalación con APP_NAME (público, lo usa también la pantalla de login)
+app.get('/api/brand', (req, res) => res.json({ name: APP_NAME }));
 app.use('/api/v1', v1Routes);
 app.use('/api/integrations', integrationRoutes);
 app.use('/api/knowledge', knowledgeRoutes);
@@ -208,7 +211,7 @@ async function start() {
   // 1. Escuchar el puerto PRIMERO — Railway mata el proceso si no responde en ~10s
   await new Promise(resolve => {
     httpServer.listen(PORT, () => {
-      console.log(`\nWhatsApp CRM corriendo en http://localhost:${PORT}`);
+      console.log(`\n${APP_NAME} corriendo en http://localhost:${PORT}`);
       console.log(`DB: ${USE_PG ? 'PostgreSQL' : 'SQLite (local)'}`);
       console.log('');
       resolve();

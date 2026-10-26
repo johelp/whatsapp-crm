@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WhatsApp CRM</title>
+<title>WhatsFlow</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/css/app.css">
@@ -15,7 +15,7 @@
   <div class="sidebar-top">
     <div class="brand">
       <span class="brand-icon">💬</span>
-      <span class="brand-name">Whatsapp CRM Multiagente</span>
+      <span class="brand-name" data-brand>WhatsFlow</span>
     </div>
     <div id="wa-pill" class="wa-status-pill disconnected" onclick="showPanel('settings')">
       <span class="wa-dot"></span>
@@ -584,6 +584,15 @@
 </div>
 
 <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+<script>
+  // Marca blanca: reemplaza "WhatsFlow" por APP_NAME de esta instalación
+  fetch('/api/brand').then(r => r.json()).then(b => {
+    if (!b.name) return;
+    window.APP_BRAND = b.name;
+    document.querySelectorAll('[data-brand]').forEach(e => e.textContent = b.name);
+    document.title = document.title.replace('WhatsFlow', b.name);
+  }).catch(() => {});
+</script>
 <script src="/js/a11y.js"></script>
 <script src="/js/app.js"></script>
 </body>

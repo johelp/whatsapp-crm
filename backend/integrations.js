@@ -192,7 +192,7 @@ async function deliver(h, d) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': 'whatsapp-crm-webhook/1',
+        'User-Agent': 'WhatsFlow-webhook/1',
         'X-Webhook-Event': d.event,
         'X-Webhook-Delivery': String(d.id),
         'X-Webhook-Timestamp': String(ts),

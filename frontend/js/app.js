@@ -37,7 +37,7 @@ const S = {
 async function init() {
   // Mostrar build en tooltip de la versión
   const vEl = document.getElementById('app-version');
-  if (vEl) vEl.title = `Build ${APP_BUILD} · WhatsApp CRM`;
+  if (vEl) vEl.title = `Build ${APP_BUILD} · ${window.APP_BRAND || "WhatsFlow"}`;
 
   // Obtener usuario actual
   const me = await apiFetch('/auth/me');
@@ -2328,7 +2328,7 @@ function hideSyncBanner() {
 
 function showDesktopNotif(title, body) {
   if (Notification.permission === 'granted') {
-    new Notification(`WA CRM — ${title}`, { body: body.substring(0, 100) });
+    new Notification(`${window.APP_BRAND || "WhatsFlow"} — ${title}`, { body: body.substring(0, 100) });
   }
 }
 

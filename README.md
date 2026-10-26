@@ -1,4 +1,4 @@
-# WhatsApp CRM v2
+# WhatsFlow
 
 Panel de gestión de WhatsApp multi-agente con bandeja compartida, agente IA, campañas masivas, grupos, auto-respuesta y trazabilidad completa de todos los mensajes.
 
