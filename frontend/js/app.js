@@ -35,6 +35,10 @@ const S = {
 // ═══════════════════════════════════════════════════════════════
 
 async function init() {
+  // Mostrar build en tooltip de la versión
+  const vEl = document.getElementById('app-version');
+  if (vEl) vEl.title = `Build ${APP_BUILD} · WhatsApp CRM`;
+
   // Obtener usuario actual
   const me = await apiFetch('/auth/me');
   if (!me || me.error) { window.location.href = '/login'; return; }
@@ -57,6 +61,21 @@ async function init() {
   // Solicitar permisos de notificación
   if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission();
+  }
+
+  // Si WA está en estado QR, buscar la imagen actual via HTTP
+  // (por si el socket se reconectó después de que el QR fue emitido)
+  const waStatus = await apiFetch('/wa/qr');
+  if (waStatus?.status === 'qr' && waStatus?.qr) {
+    const img = document.getElementById('qr-image');
+    if (img) {
+      img.src = waStatus.qr;
+      img.style.display = 'block';
+      const waiting = document.getElementById('qr-waiting');
+      if (waiting) waiting.style.display = 'none';
+    }
+    updateWAStatus('qr');
+    openModal('modal-qr');
   }
 }
 
@@ -83,109 +102,154 @@ async function apiFetch(path, opts = {}) {
 // SOCKET.IO
 // ═══════════════════════════════════════════════════════════════
 
-socket.on('wa:status', ({ status, phone }) => {
+socket.on('wa:status', ({ status, phone, qr }) => {
   updateWAStatus(status, phone);
+
+  // Si llega con QR adjunto (usuario abrió el browser cuando el QR ya existía)
+  if (status === 'qr' && qr) {
+    const img = document.getElementById('qr-image');
+    if (img) {
+      img.src = qr;
+      img.style.display = 'block';
+      const waiting = document.getElementById('qr-waiting');
+      if (waiting) waiting.style.display = 'none';
+      const subtitle = document.getElementById('qr-subtitle');
+      if (subtitle) subtitle.textContent = 'Escaneá con WhatsApp → Dispositivos vinculados';
+    }
+    openModal('modal-qr');
+  }
+
   // Cuando conecta, mostrar banner de sincronización
-  if (status === 'open') showSyncBanner();
+  if (status === 'open' || status === 'connected') {
+    // Mostrar banner de sync solo si no hay datos cargados todavía
+    // Si ya tenemos conversaciones, es una reconexión — no hace falta el banner
+    if (S.conversations.length === 0) {
+      showSyncBanner();
+    }
+    // Siempre recargar datos al conectar
+    loadConversations();
+    // Fallback: ocultar banner en 15s si history:synced no llega
+    clearTimeout(window._syncFallbackTimer);
+    window._syncFallbackTimer = setTimeout(() => {
+      hideSyncBanner();
+      loadConversations();
+      if (S.activeJid) loadMessages(S.activeJid);
+    }, 15000);
+  }
 });
 
 socket.on('wa:qr', ({ qr }) => {
-  updateWAStatus('qr');
+  // Actualizar imagen
   const img = document.getElementById('qr-image');
-  img.src = qr;
-  img.style.display = 'block';
-  document.getElementById('qr-waiting').style.display = 'none';
-  document.getElementById('qr-subtitle').textContent = 'Escaneá con WhatsApp → Dispositivos vinculados';
+  if (img) { img.src = qr; img.style.display = 'block'; }
+  const waiting = document.getElementById('qr-waiting');
+  if (waiting) waiting.style.display = 'none';
+  const subtitle = document.getElementById('qr-subtitle');
+  if (subtitle) subtitle.textContent = 'Abrí WhatsApp → Dispositivos vinculados → Vincular dispositivo';
+  // Actualizar estado y abrir modal
+  updateWAStatus('qr');
   openModal('modal-qr');
 });
 
 socket.on('message:new', async (data) => {
-  // Actualización quirúrgica: mover la conversación al tope en S.conversations
-  const idx = S.conversations.findIndex(c => c.jid === data.jid);
-  if (idx !== -1) {
-    // Actualizar campos de la conv existente
-    S.conversations[idx].last_message = data.content;
-    S.conversations[idx].last_message_at = new Date(data.timestamp).toISOString();
-    if (data.jid !== S.activeJid) {
-      S.conversations[idx].unread_count = (S.conversations[idx].unread_count || 0) + 1;
-    }
-    // Mover al tope
-    const conv = S.conversations.splice(idx, 1)[0];
+  // Actualización quirúrgica: solo mover la conv al tope y actualizar preview
+  // sin recargar TODA la lista (evita flicker y es instantáneo)
+  const existingIdx = S.conversations.findIndex(c => c.jid === data.jid);
+  if (existingIdx !== -1) {
+    const conv = { ...S.conversations[existingIdx] };
+    conv.last_message   = data.content;
+    conv.last_message_at = new Date().toISOString();
+    if (S.activeJid !== data.jid) conv.unread_count = (conv.unread_count || 0) + 1;
+    S.conversations.splice(existingIdx, 1);
     S.conversations.unshift(conv);
     renderConversationList();
   } else {
-    // Conv nueva — hacer fetch completo solo en este caso
+    // Nueva conversación — recargar desde servidor para tener todos los datos
     await loadConversations();
   }
 
-  // Si es el chat activo, agregar mensaje
+  // Si es el chat activo, agregar mensaje al área de chat
   if (S.activeJid === data.jid) {
-    // Solo agregar si no es un duplicado (el optimistic UI ya lo puso para mensajes salientes)
     appendMessage({
       direction: 'in',
       content: data.content,
       timestamp: data.timestamp,
-      is_auto_reply: data.is_auto_reply || 0,
+      is_auto_reply: 0,
       sender_name: data.sender_name || null,
-      is_group: data.is_group || false,
+      sender_jid:  data.sender_jid  || null,
     });
     apiFetch(`/conversations/${encodeURIComponent(data.jid)}/read`, { method: 'POST' });
   } else {
-    // Notificación
-    showDesktopNotif(data.contact_name, data.content);
-    notify(`💬 ${data.contact_name}: ${data.content.substring(0, 60)}`);
+    const name = data.group_name || data.contact_name || data.jid?.split('@')[0];
+    const preview = data.sender_name ? `${data.sender_name}: ${data.content}` : data.content;
+    showDesktopNotif(name, preview);
+    notify(`${data.is_group ? '👥' : '💬'} ${name}: ${preview.substring(0, 60)}`);
   }
 });
 
 socket.on('message:sent', (data) => {
-  // Actualización quirúrgica de la lista (sin reload)
-  const idx = S.conversations.findIndex(c => c.jid === data.jid);
-  if (idx !== -1) {
-    S.conversations[idx].last_message = data.content;
-    S.conversations[idx].last_message_at = new Date(data.timestamp).toISOString();
-    const conv = S.conversations.splice(idx, 1)[0];
+  // Actualización quirúrgica del preview en la lista
+  const existingIdx = S.conversations.findIndex(c => c.jid === data.jid);
+  if (existingIdx !== -1) {
+    const conv = { ...S.conversations[existingIdx] };
+    conv.last_message    = data.content;
+    conv.last_message_at = new Date().toISOString();
+    S.conversations.splice(existingIdx, 1);
     S.conversations.unshift(conv);
     renderConversationList();
-  } else {
-    loadConversations();
   }
-
-  // Si el chat está abierto y el mensaje lo envió OTRO agente (no yo), mostrarlo
-  if (S.activeJid === data.jid && data.sent_by !== S.me?.id) {
-    appendMessage({
-      direction: 'out',
-      content: data.content,
-      timestamp: data.timestamp,
-      sent_by: data.sent_by,
-      sent_by_name: data.sent_by_name,
-      sent_by_color: data.sent_by_color,
-      type: data.type || 'text',
-    });
+  // Mostrar en el chat si:
+  // a) lo envió otro agente del CRM (sent_by !== mi ID)
+  // b) lo envió desde el móvil (from_device = true, sent_by = null)
+  if (S.activeJid === data.jid) {
+    const isFromOtherAgent = data.sent_by && data.sent_by !== S.me?.id;
+    const isFromMobile = data.from_device === true;
+    if (isFromOtherAgent || isFromMobile) {
+      appendMessage({
+        direction: 'out',
+        content: data.content,
+        timestamp: data.timestamp,
+        sent_by: data.sent_by,
+        sent_by_name: data.sent_by_name,
+        sent_by_color: data.sent_by_color,
+        from_device: data.from_device,
+        type: data.type || 'text',
+      });
+    }
   }
 });
 
 socket.on('users:online', (users) => renderOnlineAgents(users));
 
-socket.on('group:updated', ({ jid, name }) => {
-  const idx = S.conversations.findIndex(c => c.jid === jid);
-  if (idx !== -1) {
-    S.conversations[idx].group_name = name;
-    S.conversations[idx].contact_name = name;
+socket.on('group:updated', ({ jid, group_name }) => {
+  const conv = S.conversations.find(c => c.jid === jid);
+  if (conv) {
+    conv.contact_name = group_name;
+    conv.group_name   = group_name;
     renderConversationList();
-    // Si es la conv activa actualizar el header
+    // Actualizar header si el grupo está activo
     if (S.activeJid === jid) {
-      const el = document.getElementById('ch-name');
-      if (el) el.textContent = name;
+      document.getElementById('ch-name').textContent = group_name;
     }
   }
 });
 
-socket.on('history:synced', ({ count }) => {
+socket.on('history:progress', ({ total, imported, status }) => {
+  const banner = document.getElementById('sync-banner');
+  if (banner) {
+    const pct = total > 0 ? Math.round((imported / total) * 100) : 0;
+    const msgEl = banner.querySelector('.sync-msg');
+    if (msgEl) msgEl.textContent = `Importando historial... ${imported}/${total} mensajes (${pct}%)`;
+  }
+});
+
+socket.on('history:synced', ({ count, isLatest }) => {
+  clearTimeout(window._syncFallbackTimer);
   hideSyncBanner();
-  notify(`📥 ${count} mensajes importados desde WhatsApp`);
-  loadConversations();
-  // Recargar mensajes del chat activo (loadMessages no existe — usar openChat)
-  if (S.activeJid) openChat(S.activeJid);
+  if (count > 0) notify(`📥 ${count} mensajes sincronizados`);
+  loadConversations().then(() => {
+    if (S.activeJid) loadMessages(S.activeJid);
+  });
 });
 
 socket.on('typing:remote', ({ jid, user }) => {
@@ -281,10 +345,50 @@ function updateWAStatus(status, phone) {
   const pill = document.getElementById('wa-pill');
   const text = document.getElementById('wa-status-text');
   pill.className = `wa-status-pill ${status}`;
-  if (status === 'connected') text.textContent = phone ? `+${phone}` : 'Conectado';
-  else if (status === 'qr') text.textContent = 'Escanear QR';
-  else if (status === 'connecting') text.textContent = 'Conectando...';
-  else text.textContent = 'Desconectado';
+  pill.style.cursor = 'default';
+  pill.onclick = null;
+
+  if (status === 'connected' || status === 'open') {
+    text.textContent = phone ? `+${phone}` : 'Conectado';
+  } else if (status === 'qr') {
+    text.textContent = '📷 Escanear QR';
+    pill.onclick = () => openModal('modal-qr');
+    pill.style.cursor = 'pointer';
+    // Actualizar el wa-status-card si está visible
+    const card = document.getElementById('wa-status-card');
+    if (card) card.innerHTML = `
+      <p style="margin-bottom:8px">Escaneá el código QR para conectar WhatsApp.</p>
+      <button class="btn-primary btn-sm" onclick="openModal('modal-qr')">📷 Ver QR</button>`;
+  } else if (status === 'connecting') {
+    text.textContent = '⏳ Conectando...';
+  } else {
+    text.textContent = 'Desconectado';
+    // Mostrar botón de reconexión en el status card
+    const card = document.getElementById('wa-status-card');
+    if (card) card.innerHTML = `
+      <p style="margin-bottom:8px;color:var(--red)">WhatsApp desconectado. Esperando reconexión...</p>
+      <button class="btn-secondary btn-sm" onclick="checkForQR()">🔍 Verificar QR</button>`;
+  }
+}
+
+// Verificar si hay un QR disponible (útil cuando la sesión se cierra)
+async function checkForQR() {
+  const res = await apiFetch('/wa/qr');
+  if (res?.status === 'qr' && res?.qr) {
+    const img = document.getElementById('qr-image');
+    if (img) { img.src = res.qr; img.style.display = 'block'; }
+    const waiting = document.getElementById('qr-waiting');
+    if (waiting) waiting.style.display = 'none';
+    const subtitle = document.getElementById('qr-subtitle');
+    if (subtitle) subtitle.textContent = 'Escaneá con WhatsApp → Dispositivos vinculados';
+    updateWAStatus('qr');
+    openModal('modal-qr');
+  } else if (res?.status === 'connected') {
+    notify('WhatsApp ya está conectado', 'success');
+    updateWAStatus('connected');
+  } else {
+    notify('Generando QR... esperá unos segundos y volvé a intentar', 'warning');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -410,30 +514,46 @@ function renderConversationList() {
   }
 
   el.innerHTML = convs.map(c => {
-    const isGroup = c.jid.endsWith('@g.us');
-    const name = isGroup
-      ? (c.group_name || c.contact_name || c.jid)
-      : (c.contact_name || c.contact_phone || c.jid.split('@')[0]);
+    const isGroup = c.is_group == 1 || c.jid?.endsWith('@g.us');
+    const isLid   = c.jid?.endsWith('@lid');
+    const rawId   = c.jid?.split('@')[0] || '';
+
+    // Prioridad: nombre agendado → pushName WA → número con + → 'Contacto privado' para LID
+    let name;
+    if (isGroup) {
+      name = c.group_name || c.contact_name || rawId;
+    } else {
+      const savedName = c.contact_saved_name && c.contact_saved_name !== rawId
+        ? c.contact_saved_name : null;
+      const pushName = c.wa_push_name && c.wa_push_name !== rawId
+        ? c.wa_push_name : null;
+      const contactName = c.contact_name && c.contact_name !== rawId && !/^\d+$/.test(c.contact_name)
+        ? c.contact_name : null;
+      if (savedName)       name = savedName;
+      else if (pushName)   name = pushName;
+      else if (contactName) name = contactName;
+      else if (isLid)      name = 'Contacto privado';
+      else if (/^\d+$/.test(rawId)) name = '+' + rawId;
+      else                 name = rawId || '?';
+    }
     const avatar = isGroup ? '👥' : (name[0]?.toUpperCase() || '?');
-    const groupBadge = isGroup
-      ? `<span class="group-badge">grupo</span>`
-      : '';
+    const avatarStyle = isGroup ? 'font-size:18px;display:flex;align-items:center;justify-content:center;background:var(--surface3)' : '';
     const labels = (c.labels || []).map(l =>
       `<span class="label-pill" style="background:${l.color}" title="${esc(l.name)}"></span>`
     ).join('');
     const assignedChip = c.assigned_name
       ? `<span class="assigned-chip" style="background:${c.assigned_color}">${c.assigned_name[0]}</span>`
       : '';
+    const groupBadge = isGroup ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">grupo</span>` : '';
     return `
-    <div class="chat-item ${c.jid === S.activeJid ? 'active' : ''}" onclick="openChat('${esc(c.jid)}')">
-      <div class="chat-avatar">${avatar}</div>
+    <div class="chat-item ${c.jid === S.activeJid ? 'active' : ''}" onclick="openChat('${c.jid}')">
+      <div class="chat-avatar" style="${avatarStyle}">${avatar}</div>
       <div class="chat-body">
         <div class="chat-name-row">
-          <span class="chat-name">${esc(name)}</span>
-          ${groupBadge}
+          <span class="chat-name">${esc(name)}${groupBadge}</span>
           <span class="chat-time">${fmtTime(c.last_message_at)}</span>
         </div>
-        <div class="chat-preview">${esc(c.last_message || '')}</div>
+        <div class="chat-preview">${esc(cleanPreview(c.last_message))}</div>
         <div class="chat-footer">
           ${labels}
           ${assignedChip}
@@ -487,25 +607,30 @@ async function openChat(jid) {
   document.getElementById('chat-active').style.height = '100%';
 
   const conv = S.conversations.find(c => c.jid === jid);
-  const isGroup = jid.endsWith('@g.us');
+  const isGroup = jid.endsWith('@g.us') || conv?.is_group == 1;
+  const phone = jid.split('@')[0];
 
-  let displayName, subLine;
+  let displayName;
   if (isGroup) {
-    displayName = conv?.group_name || conv?.contact_name || jid;
-    subLine = 'Grupo de WhatsApp';
+    displayName = conv?.group_name || conv?.contact_name || phone;
   } else {
-    const phone = jid.split('@')[0];
     displayName = conv?.contact_name && conv.contact_name !== phone
       ? conv.contact_name
       : (conv?.wa_push_name || conv?.contact_phone || phone);
-    subLine = `+${phone}`;
   }
 
   // Header
-  document.getElementById('ch-avatar').textContent = isGroup ? '👥' : (displayName[0]?.toUpperCase() || '?');
+  const avatarEl = document.getElementById('ch-avatar');
+  if (isGroup) {
+    avatarEl.textContent = '👥';
+    avatarEl.style.fontSize = '20px';
+  } else {
+    avatarEl.textContent = displayName[0]?.toUpperCase() || '?';
+    avatarEl.style.fontSize = '';
+  }
   document.getElementById('ch-name').textContent = displayName;
-  document.getElementById('ch-phone').textContent = isGroup ? subLine : subLine;
-  document.getElementById('ch-company').textContent = (!isGroup && conv?.company) ? `· ${conv.company}` : '';
+  document.getElementById('ch-phone').textContent = isGroup ? `${jid}` : `+${phone}`;
+  document.getElementById('ch-company').textContent = isGroup ? '👥 Grupo de WhatsApp' : (conv?.company ? `· ${conv.company}` : '');
 
   // Status y asignación
   document.getElementById('conv-status-sel').value = conv?.status || 'open';
@@ -522,14 +647,10 @@ async function openChat(jid) {
 
   // Cargar mensajes
   const msgs = await apiFetch(`/conversations/${encodeURIComponent(jid)}/messages`) || [];
-  renderMessages(msgs, isGroup);
+  renderMessages(msgs);
 
   // Marcar como leído
   await apiFetch(`/conversations/${encodeURIComponent(jid)}/read`, { method: 'POST' });
-
-  // Resetear unread en estado local
-  const idx = S.conversations.findIndex(c => c.jid === jid);
-  if (idx !== -1) S.conversations[idx].unread_count = 0;
 
   // Avisar a otros que estoy viendo este chat
   socket.emit('chat:open', { jid });
@@ -584,12 +705,85 @@ function renderViewingIndicator(jid) {
   ).join('');
 }
 
-function renderMessages(msgs, isGroup = false) {
+// Renderiza el contenido de un mensaje según su tipo (texto, imagen, audio, etc.)
+function renderMsgContent(m) {
+  const media = m.media_data ? (typeof m.media_data === 'string' ? JSON.parse(m.media_data) : m.media_data) : null;
+  const msgId = m.message_id;
+  const caption = media?.caption ? `<div class="media-caption">${esc(media.caption)}</div>` : '';
+  const text = m.content || '';
+
+  if (media?.type === 'image') {
+    return `<div class="msg-media">
+      <img src="/api/messages/${encodeURIComponent(msgId)}/media"
+           class="msg-image" loading="lazy"
+           onclick="openMediaModal(this.src, 'image')"
+           onerror="this.parentElement.innerHTML='<span class=\"media-error\">🖼 ${esc(text || 'Imagen')}</span>'"
+           alt="Imagen">
+      ${caption}
+    </div>`;
+  }
+
+  if (media?.type === 'video') {
+    return `<div class="msg-media">
+      <video controls class="msg-video" preload="metadata"
+             onerror="this.parentElement.innerHTML='<span class=\"media-error\">🎬 ${esc(text || 'Video')}</span>'">
+        <source src="/api/messages/${encodeURIComponent(msgId)}/media" type="${media.mimetype || 'video/mp4'}">
+      </video>
+      ${caption}
+    </div>`;
+  }
+
+  if (media?.type === 'audio') {
+    const isPtt = media.ptt;
+    const secs = media.seconds || 0;
+    const duration = secs > 0 ? ` · ${Math.floor(secs/60)}:${String(secs%60).padStart(2,'0')}` : '';
+    return `<div class="msg-audio">
+      ${isPtt ? '🎤' : '🎵'}<span class="audio-label">${isPtt ? 'Nota de voz' : 'Audio'}${duration}</span>
+      <audio controls preload="none" class="msg-audio-player"
+             onerror="this.parentElement.innerHTML='<span class=\"media-error\">🎵 Audio no disponible</span>'">
+        <source src="/api/messages/${encodeURIComponent(msgId)}/media" type="${media.mimetype || 'audio/ogg'}">
+      </audio>
+    </div>`;
+  }
+
+  if (media?.type === 'document') {
+    const fname = media.fileName || 'archivo';
+    const size = media.fileLength ? ` (${Math.round(media.fileLength/1024)}KB)` : '';
+    return `<div class="msg-document">
+      <a href="/api/messages/${encodeURIComponent(msgId)}/media"
+         target="_blank" class="msg-doc-link" download="${esc(fname)}">
+        📎 ${esc(fname)}${size}
+      </a>
+    </div>`;
+  }
+
+  // Texto plano o tipos sin media
+  return esc(text || m.content || '[mensaje]');
+}
+
+// Modal para ver imágenes en grande
+function openMediaModal(src, type) {
+  let modal = document.getElementById('media-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'media-modal';
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;display:flex;align-items:center;justify-content:center;cursor:zoom-out';
+    modal.onclick = () => modal.remove();
+    document.body.appendChild(modal);
+  }
+  modal.innerHTML = `<img src="${src}" style="max-width:90vw;max-height:90vh;border-radius:8px;object-fit:contain">`;
+  modal.style.display = 'flex';
+}
+
+function renderMessages(msgs) {
   const el = document.getElementById('messages-area');
   if (!msgs || !msgs.length) {
     el.innerHTML = '<div class="msg-date-sep" style="opacity:0.5">Sin mensajes aún en el CRM — los nuevos mensajes aparecerán aquí</div>';
     return;
   }
+
+  const activeConv = S.conversations.find(c => c.jid === S.activeJid);
+  const isGroupChat = S.activeJid?.endsWith('@g.us') || activeConv?.is_group == 1;
 
   let lastDate = '';
   el.innerHTML = msgs.map(m => {
@@ -600,19 +794,25 @@ function renderMessages(msgs, isGroup = false) {
     const timeStr = d ? d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' }) : '--:--';
     const sep = dateStr !== lastDate ? `<div class="msg-date-sep">${dateStr}</div>` : '';
     lastDate = dateStr;
-    const agentTag = m.sent_by && m.sent_by_name
-      ? `<span class="msg-agent" style="background:${m.sent_by_color || '#6366f1'}">${m.sent_by_name[0]}</span>`
-      : '';
+    // sent_by=null y sent_by_name='📱 Móvil' → enviado desde el teléfono
+    const fromDevice = m.direction === 'out' && !m.sent_by && !m.sent_by_name;
+    // También soportar cuando viene del socket con sent_by_name='📱 Móvil'
+    const isFromMobile = fromDevice || (m.direction === 'out' && m.from_device);
+    const agentTag = isFromMobile
+      ? `<span class="msg-agent msg-agent-mobile" title="Enviado desde el móvil">📱</span>`
+      : (m.sent_by && m.sent_by_name
+          ? `<span class="msg-agent" style="background:${m.sent_by_color || '#6366f1'}">${m.sent_by_name[0]}</span>`
+          : '');
     const autoTag = m.is_auto_reply ? '<span class="msg-auto-tag">bot</span>' : '';
-    const content = m.content || '[archivo]';
-    // En grupos mostrar nombre del sender para mensajes entrantes
-    const senderTag = isGroup && m.direction === 'in' && m.sender_name
+    // En grupos, mostrar quién habló encima del mensaje (solo para mensajes entrantes)
+    const senderTag = isGroupChat && m.direction === 'in' && m.sender_name
       ? `<div class="msg-sender-name">${esc(m.sender_name)}</div>`
       : '';
+    const bubbleContent = renderMsgContent(m);
     return `${sep}
-    <div class="msg-wrap ${m.direction} ${m.is_auto_reply ? 'auto' : ''}">
+    <div class="msg-wrap ${m.direction} ${m.is_auto_reply ? 'auto' : ''} ${isFromMobile ? 'from-device' : ''}">
       ${senderTag}
-      <div class="msg-bubble">${esc(content)}</div>
+      <div class="msg-bubble">${bubbleContent}</div>
       <div class="msg-meta">
         <span class="msg-time">${timeStr}</span>
         ${agentTag}${autoTag}
@@ -623,6 +823,13 @@ function renderMessages(msgs, isGroup = false) {
   el.scrollTop = el.scrollHeight;
 }
 
+// Recarga solo los mensajes del chat activo
+async function loadMessages(jid) {
+  if (!jid) return;
+  const msgs = await apiFetch(`/conversations/${encodeURIComponent(jid)}/messages`) || [];
+  renderMessages(msgs);
+}
+
 function appendMessage(msg) {
   const el = document.getElementById('messages-area');
   const ts = Number(msg.timestamp);
@@ -630,22 +837,27 @@ function appendMessage(msg) {
   const wrap = document.createElement('div');
   wrap.className = `msg-wrap ${msg.direction}`;
 
+  const activeConv = S.conversations.find(c => c.jid === S.activeJid);
+  const isGroupChat = S.activeJid?.endsWith('@g.us') || activeConv?.is_group == 1;
+
   let agentTag = '';
-  if (msg.direction === 'out' && msg.sent_by_name) {
-    agentTag = `<span class="msg-agent" style="background:${msg.sent_by_color || '#6366f1'}">${msg.sent_by_name[0]}</span>`;
-  } else if (msg.direction === 'out' && S.me && !msg.sent_by) {
-    // Mensaje optimistic del agente actual
+  const isFromMobile = msg.from_device || (msg.direction === 'out' && !msg.sent_by && !msg.sent_by_name);
+  if (isFromMobile) {
+    agentTag = `<span class="msg-agent msg-agent-mobile" title="Enviado desde el móvil">📱</span>`;
+  } else if (msg.direction === 'out' && S.me && !msg.sent_by_name) {
     agentTag = `<span class="msg-agent" style="background:${S.me.color}">${S.me.display_name[0]}</span>`;
+  } else if (msg.sent_by_name) {
+    agentTag = `<span class="msg-agent" style="background:${msg.sent_by_color || '#6366f1'}">${msg.sent_by_name[0]}</span>`;
   }
 
-  // Nombre del sender en grupos para mensajes entrantes
-  const senderTag = msg.is_group && msg.direction === 'in' && msg.sender_name
+  // Sender en grupos
+  const senderTag = isGroupChat && msg.direction === 'in' && msg.sender_name
     ? `<div class="msg-sender-name">${esc(msg.sender_name)}</div>`
     : '';
 
   wrap.innerHTML = `
     ${senderTag}
-    <div class="msg-bubble">${esc(msg.content)}</div>
+    <div class="msg-bubble">${renderMsgContent(msg)}</div>
     <div class="msg-meta">
       <span class="msg-time">${d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}</span>
       ${agentTag}
@@ -712,11 +924,11 @@ async function saveContactFromChat() {
   if (!S.activeJid) return;
   const conv = S.conversations.find(c => c.jid === S.activeJid);
   const phone = S.activeJid.split('@')[0];
-  const name = conv?.contact_name || '';
+  const name = conv?.wa_push_name || conv?.contact_name || '';
 
   // Si ya tiene nombre real (no es solo el número), confirmar
   if (name && name !== phone) {
-    if (!confirm(`¿Guardar "${name}" (+${phone}) como contacto?`)) return;
+    if (!confirm(`¿Guardar "${name}" como contacto?`)) return;
     const res = await apiFetch('/contacts/from-conversation', {
       method: 'POST',
       body: JSON.stringify({ jid: S.activeJid, name }),
@@ -743,9 +955,6 @@ async function saveContactFromChat() {
   }
 }
 
-// Override saveContact para manejar el caso from-conversation
-const _origSaveContact = typeof saveContact !== 'undefined' ? saveContact : null;
-
 async function saveContact() {
   const id = document.getElementById('ct-id').value;
   const body = {
@@ -758,7 +967,6 @@ async function saveContact() {
   if (!body.phone) { notify('El teléfono es obligatorio', 'error'); return; }
 
   if (window._saveFromChat) {
-    // Guardar desde conversación
     const res = await apiFetch('/contacts/from-conversation', {
       method: 'POST',
       body: JSON.stringify({ jid: window._saveFromChat, ...body }),
@@ -767,16 +975,20 @@ async function saveContact() {
     closeModal('modal-contact');
     await loadContacts();
     await loadConversations();
+    if (S.activeJid) openChat(S.activeJid);
     notify('✅ Contacto guardado');
   } else if (id) {
     await apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(body) });
     closeModal('modal-contact');
     await loadContacts();
+    await loadConversations();
+    if (S.activeJid) openChat(S.activeJid);
     notify('✅ Contacto actualizado');
   } else {
     await apiFetch('/contacts', { method: 'POST', body: JSON.stringify(body) });
     closeModal('modal-contact');
     await loadContacts();
+    await loadConversations();
     notify('✅ Contacto agregado');
   }
 }
@@ -1061,10 +1273,10 @@ async function sendMsg() {
   // Parar typing indicator
   socket.emit('typing:stop', { jid: S.activeJid });
 
-  const phone = S.activeJid.split('@')[0];
+  // Pasar el JID completo para que el backend sepa si es @lid, @s.whatsapp.net o @g.us
   const res = await apiFetch('/send', {
     method: 'POST',
-    body: JSON.stringify({ phone, message: text }),
+    body: JSON.stringify({ jid: S.activeJid, message: text }),
   });
 
   if (res?.error) notify(res.error, 'error');
@@ -1205,7 +1417,10 @@ function renderCampaignsGrid() {
       <div class="camp-actions">
         ${canStart ? `<button class="btn-primary btn-sm" onclick="startCampaign(${c.id})">▶ Iniciar</button>` : ''}
         ${isActive ? `<button class="btn-danger btn-sm" onclick="cancelActiveCampaign()">⛔ Cancelar</button>` : ''}
-        <button class="btn-secondary btn-sm" onclick="editCampaign(${c.id})">✏️ Editar</button>
+        ${isDone ? `<button class="btn-secondary btn-sm" onclick="editCampaign(${c.id});setTimeout(()=>resetCampaign(),200)">↺ Reutilizar</button>` : ''}
+        <button class="btn-secondary btn-sm" onclick="editCampaign(${c.id})" title="Ver y editar campaña">✏️ Editar</button>
+        <button class="btn-secondary btn-sm" onclick="duplicateCampaign(${c.id})" title="Duplicar campaña">⧉</button>
+        <button class="btn-danger btn-sm" onclick="deleteCampaignById(${c.id})" title="Eliminar campaña">🗑</button>
       </div>
     </div>`;
   }).join('');
@@ -1391,7 +1606,13 @@ async function deleteCampaign() {
   const id = document.getElementById('c-id').value;
   const name = document.getElementById('c-name').value;
   if (!id) return;
-  if (!confirm(`¿Eliminar campaña "${name}"? Esta acción no se puede deshacer.`)) return;
+  await deleteCampaignById(parseInt(id), name);
+}
+
+async function deleteCampaignById(id, name) {
+  const c = S.campaigns.find(x => x.id === id);
+  const label = name || c?.name || `#${id}`;
+  if (!confirm(`¿Eliminar campaña "${label}"? Esta acción no se puede deshacer.`)) return;
   const res = await apiFetch(`/campaigns/${id}`, { method: 'DELETE' });
   if (res?.ok) {
     closeModal('modal-campaign');
@@ -1399,6 +1620,20 @@ async function deleteCampaign() {
     notify(`✅ Campaña eliminada`);
   } else {
     notify(res?.error || 'Error', 'error');
+  }
+}
+
+async function duplicateCampaign(id) {
+  const c = S.campaigns.find(x => x.id === id);
+  if (!confirm(`¿Duplicar campaña "${c?.name}"?`)) return;
+  const res = await apiFetch(`/campaigns/${id}/duplicate`, { method: 'POST' });
+  if (res?.ok) {
+    notify(`✅ Campaña duplicada como "${c?.name} (copia)"`);
+    await loadCampaigns();
+    // Abrir la copia para editarla
+    if (res.id) editCampaign(res.id);
+  } else {
+    notify(res?.error || 'Error duplicando', 'error');
   }
 }
 
@@ -1461,133 +1696,6 @@ async function viewCampaignContacts(id) { editCampaign(id); }
 async function createCampaign() { saveCampaign(); }
 
 
-
-function renderCampaignsGrid() {
-  const el = document.getElementById('campaigns-grid');
-  if (!S.campaigns.length) {
-    el.innerHTML = '<div class="list-empty" style="grid-column:span 2">No hay campañas. Creá una para empezar.</div>';
-    return;
-  }
-  el.innerHTML = S.campaigns.map(c => {
-    const pct = c.total > 0 ? Math.round((c.sent / c.total) * 100) : 0;
-    const canStart = c.status === 'draft' && c.total > 0;
-    const isRunning = c.status === 'running';
-    return `
-    <div class="camp-card">
-      <div class="camp-card-top">
-        <div>
-          <div class="camp-card-name">${esc(c.name)}</div>
-          <div class="camp-card-type">${c.type} · ${c.created_by_name || 'Sistema'}</div>
-        </div>
-        <span class="status-pill ${c.status}">${c.status}</span>
-      </div>
-      <div class="camp-template">${esc(c.template.substring(0, 120))}${c.template.length > 120 ? '...' : ''}</div>
-      ${c.total > 0 ? `
-        <div class="camp-progress"><div class="camp-progress-bar" style="width:${pct}%"></div></div>
-        <div class="camp-stats">
-          <span class="camp-stat">Total: <b>${c.total}</b></span>
-          <span class="camp-stat sent">Enviados: <b>${c.sent}</b></span>
-          <span class="camp-stat failed">Fallidos: <b>${c.failed}</b></span>
-        </div>` : '<div style="font-size:12px;color:var(--text3)">Sin contactos cargados</div>'}
-      <div class="camp-actions">
-        ${canStart ? `<button class="btn-primary btn-sm" onclick="startCampaign(${c.id})">▶ Iniciar</button>` : ''}
-        ${isRunning ? `<button class="btn-danger btn-sm" onclick="cancelActiveCampaign()">⛔ Cancelar</button>` : ''}
-        <button class="btn-secondary btn-sm" onclick="viewCampaignContacts(${c.id})">📋 Ver contactos</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-
-function openCampaignModal() {
-  document.getElementById('c-name').value = '';
-  document.getElementById('c-template').value = '';
-  document.getElementById('c-contacts').value = '';
-  document.getElementById('c-preview').style.display = 'none';
-  document.getElementById('c-schedule').value = '';
-  openModal('modal-campaign');
-}
-
-function loadCampaignCSV(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (e) => {
-    const lines = e.target.result.split('\n').filter(l => l.trim());
-    const start = /nombre|phone|telefono/i.test(lines[0]) ? 1 : 0;
-    document.getElementById('c-contacts').value = lines.slice(start).join('\n');
-  };
-  reader.readAsText(file);
-}
-
-function previewMsg() {
-  const template = document.getElementById('c-template').value;
-  const first = document.getElementById('c-contacts').value.trim().split('\n')[0];
-  if (!first) return;
-  const [phone, name, extra] = first.split(',').map(s => s.trim());
-  const preview = template
-    .replace(/\{\{nombre\}\}/gi, name || phone)
-    .replace(/\{\{empresa\}\}/gi, '')
-    .replace(/\{\{extra\}\}/gi, extra || '')
-    .replace(/\{\{telefono\}\}/gi, phone);
-  const el = document.getElementById('c-preview');
-  el.textContent = preview;
-  el.style.display = 'block';
-}
-
-async function createCampaign() {
-  const name = document.getElementById('c-name').value.trim();
-  const template = document.getElementById('c-template').value.trim();
-  const raw = document.getElementById('c-contacts').value.trim();
-
-  if (!name || !template) { notify('Nombre y plantilla son obligatorios', 'error'); return; }
-
-  const contacts = raw ? raw.split('\n').filter(l => l.trim()).map(line => {
-    const [phone, name2, extra] = line.split(',').map(s => s.trim());
-    return { phone, name: name2 || '', extra: extra || '' };
-  }).filter(c => c.phone?.replace(/\D/g, '').length >= 7) : [];
-
-  const res = await apiFetch('/campaigns', {
-    method: 'POST',
-    body: JSON.stringify({
-      name,
-      type: document.getElementById('c-type').value,
-      template,
-      delay_min: parseInt(document.getElementById('c-dmin').value),
-      delay_max: parseInt(document.getElementById('c-dmax').value),
-      scheduled_at: document.getElementById('c-schedule').value || null,
-      contacts,
-    }),
-  });
-
-  if (res?.id) {
-    closeModal('modal-campaign');
-    loadCampaigns();
-    notify(`✅ Campaña "${name}" creada con ${contacts.length} contactos`);
-  } else {
-    notify(res?.error || 'Error creando campaña', 'error');
-  }
-}
-
-async function startCampaign(id) {
-  const res = await apiFetch(`/campaigns/${id}/start`, { method: 'POST' });
-  if (res?.error) notify(res.error, 'error');
-  else { S.activeCampaignId = id; loadCampaigns(); }
-}
-
-async function cancelActiveCampaign() {
-  if (!S.activeCampaignId) return;
-  await apiFetch(`/campaigns/${S.activeCampaignId}/cancel`, { method: 'POST' });
-}
-
-async function viewCampaignContacts(id) {
-  const contacts = await apiFetch(`/campaigns/${id}/contacts`) || [];
-  const camp = S.campaigns.find(c => c.id === id);
-  const lines = contacts.map(c => {
-    const icon = c.status === 'sent' ? '✅' : c.status === 'failed' ? '❌' : '⏳';
-    return `${icon} ${c.name || c.phone} (${c.status})${c.error ? ' — ' + c.error : ''}`;
-  }).join('\n');
-  alert(`Campaña: ${camp?.name}\n\n${lines || 'Sin contactos'}`);
-}
 
 // ═══════════════════════════════════════════════════════════════
 // CONTACTS
@@ -1655,23 +1763,6 @@ function openContactModal(id) {
   document.getElementById('ct-extra').value = c?.extra || '';
   document.getElementById('ct-notes').value = c?.notes || '';
   openModal('modal-contact');
-}
-
-async function saveContact() {
-  const id = document.getElementById('ct-id').value;
-  const body = {
-    phone: document.getElementById('ct-phone').value.replace(/\D/g, ''),
-    name: document.getElementById('ct-name').value,
-    company: document.getElementById('ct-company').value,
-    extra: document.getElementById('ct-extra').value,
-    notes: document.getElementById('ct-notes').value,
-  };
-  if (!body.phone) { notify('El teléfono es obligatorio', 'error'); return; }
-  if (id) await apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(body) });
-  else await apiFetch('/contacts', { method: 'POST', body: JSON.stringify(body) });
-  closeModal('modal-contact');
-  await loadContacts();
-  notify('✅ Contacto guardado');
 }
 
 async function deleteContact(id) {
@@ -1742,6 +1833,21 @@ async function renderSettings() {
         </div>
         <div class="field"><label>Hora inicio</label><input class="input" type="time" id="ar-start" value="${autoReply.schedule_start || '09:00'}"></div>
         <div class="field"><label>Hora fin</label><input class="input" type="time" id="ar-end" value="${autoReply.schedule_end || '18:00'}"></div>
+        <div class="field"><label>Zona horaria</label>
+          <select class="input" id="ar-timezone">
+            ${[
+              ['Europe/Madrid','España (Madrid)'],
+              ['America/Argentina/Buenos_Aires','Argentina (Buenos Aires)'],
+              ['America/Mexico_City','México (CDMX)'],
+              ['America/Bogota','Colombia (Bogotá)'],
+              ['America/Santiago','Chile (Santiago)'],
+              ['America/Lima','Perú (Lima)'],
+              ['America/New_York','USA Eastern'],
+              ['America/Los_Angeles','USA Pacific'],
+              ['UTC','UTC'],
+            ].map(([v,l]) => `<option value="${v}" ${(autoReply.timezone || 'Europe/Madrid') === v ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+        </div>
         <div class="field"><label>Días hábiles</label><input class="input" id="ar-days" value="${autoReply.working_days || '1,2,3,4,5'}" placeholder="1=Lun...7=Dom"></div>
       </div>
       <div class="field" style="margin-bottom:12px">
@@ -1793,6 +1899,7 @@ async function renderSettings() {
           <input class="input" type="password" id="sys-pwd-repair" placeholder="••••••••">
         </div>
         <button class="btn-secondary" onclick="systemRepairDB()">🔧 Reparar DB</button>
+        <button class="btn-secondary" onclick="systemFixNames()" title="Rellena nombres faltantes en conversaciones usando el historial de mensajes">👤 Reparar nombres</button>
       </div>
       <div id="repair-result" style="margin-top:8px;font-size:12px"></div>
 
@@ -1817,10 +1924,17 @@ async function renderSettings() {
           <button class="btn-secondary" onclick="systemResyncHistory()" title="Pide a WhatsApp que reenvíe el historial de mensajes">
             🔄 Re-sincronizar historial WA
           </button>
+          <button class="btn-warning" onclick="systemFullResetAuth()"
+            title="Borra la sesión y re-vincula desde cero — WhatsApp envía el historial COMPLETO"
+            style="background:var(--orange,#f97316);color:#fff;border:none;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px">
+            🔁 Sincronización COMPLETA (re-vincular)
+          </button>
         </div>
       </div>
       <div id="seed-result" style="font-size:12px;color:var(--text3)">
-        El <b>Seed</b> crea un mensaje por chat usando el último mensaje guardado. El <b>Re-sync</b> le pide al teléfono que reenvíe el historial completo (puede tardar varios minutos).
+        El <b>Seed</b> crea un mensaje por chat usando el último mensaje guardado.<br>
+        El <b>Re-sync</b> pide al teléfono que reenvíe mensajes recientes.<br>
+        La <b>Sincronización COMPLETA</b> borra la sesión y re-vincula desde cero — WhatsApp manda TODO el historial (hasta 3 meses). Requiere escanear el QR nuevamente.
       </div>
 
       <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
@@ -1978,6 +2092,7 @@ async function saveAutoReply() {
       is_active: document.getElementById('ar-toggle').classList.contains('on'),
       schedule_start: document.getElementById('ar-start').value,
       schedule_end: document.getElementById('ar-end').value,
+      timezone: document.getElementById('ar-timezone').value,
       working_days: document.getElementById('ar-days').value,
       greeting_message: document.getElementById('ar-msg').value,
       collect_fields: fields,
@@ -2077,15 +2192,19 @@ function showSyncBanner() {
     banner.id = 'sync-banner';
     banner.innerHTML = `
       <span class="sync-spinner"></span>
-      <span>Sincronizando historial de WhatsApp... los mensajes aparecerán en breve</span>
+      <span class="sync-msg">Sincronizando historial de WhatsApp...</span>
       <button onclick="hideSyncBanner()" style="margin-left:auto;background:none;border:none;color:inherit;cursor:pointer;font-size:16px">✕</button>
     `;
     document.body.insertBefore(banner, document.body.firstChild);
   }
   banner.style.display = 'flex';
-  // Auto-ocultar después de 3 minutos si no llegó el evento history:synced
+  // Auto-ocultar después de 15 segundos si no llegó el evento history:synced
+  // El historial llega rápido o no llega — no tiene sentido esperar 3 minutos
   clearTimeout(_syncBannerTimeout);
-  _syncBannerTimeout = setTimeout(() => hideSyncBanner(), 3 * 60 * 1000);
+  _syncBannerTimeout = setTimeout(() => {
+    hideSyncBanner();
+    loadConversations(); // recargar aunque no haya llegado el evento
+  }, 15000);
 }
 function hideSyncBanner() {
   const banner = document.getElementById('sync-banner');
@@ -2110,6 +2229,14 @@ function esc(str) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function cleanPreview(text) {
+  if (!text) return '';
+  const hidden = ['[protocolMessage]','[senderKeyDistributionMessage]',
+    '[messageContextInfo]','[ephemeralMessage]','[viewOnceMessage]','[viewOnceMessageV2]'];
+  if (hidden.some(h => text.trim() === h)) return '';
+  return text;
 }
 
 function fmtTime(dt) {
@@ -2542,20 +2669,79 @@ async function systemSeedMessages() {
   }
 }
 
+async function systemFullResetAuth() {
+  const pwd = document.getElementById('sys-pwd-seed')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña primero', 'warning'); return; }
+  
+  const ok = confirm(
+    'SINCRONIZACION COMPLETA\n\n' +
+    'Esto va a:\n' +
+    '1. Cerrar la sesion actual de WhatsApp\n' +
+    '2. Borrar las credenciales guardadas\n' +
+    '3. Mostrar un QR para re-vincular\n\n' +
+    'Al re-vincular, WhatsApp enviara el historial completo (hasta 3 meses).\n\n' +
+    'Continuar?'
+  );
+  if (!ok) return;
+
+  const el = document.getElementById('seed-result');
+  if (el) el.innerHTML = '⏳ Borrando credenciales y desconectando...';
+
+  const res = await apiFetch('/system/full-reset-auth', {
+    method: 'POST',
+    body: JSON.stringify({ password: pwd }),
+  });
+
+  if (res?.ok) {
+    notify('✅ ' + res.message, 'success');
+    if (el) el.innerHTML = `
+      <div style="background:var(--surface3);padding:12px;border-radius:8px;margin-top:8px">
+        <b>✅ Credenciales borradas.</b><br>
+        Ahora verás el QR en el panel de conexión (ícono de WhatsApp en la barra lateral).<br>
+        <b>Escanealo con tu teléfono</b> → WhatsApp enviará el historial completo automáticamente.
+      </div>`;
+    // Mostrar el QR después de 2 segundos
+    setTimeout(() => {
+      loadConversations();
+    }, 3000);
+  } else {
+    notify(res?.error || 'Error al resetear', 'error');
+    if (el) el.textContent = res?.error || 'Error';
+  }
+}
+
 async function systemResyncHistory() {
   const pwd = document.getElementById('sys-pwd-seed')?.value;
   if (!pwd) { notify('Ingresá tu contraseña', 'error'); return; }
   const el = document.getElementById('seed-result');
-  el.innerHTML = '<span style="color:var(--text3)">Solicitando re-sincronización...</span>';
+  el.innerHTML = '<span style="color:var(--text3)">⏳ Solicitando re-sincronización a WhatsApp...</span>';
 
   const res = await apiFetch('/system/resync-history', { method: 'POST', body: JSON.stringify({ password: pwd }) });
   if (res?.ok) {
-    el.innerHTML = `<span style="color:var(--wa)">✅ ${res.message}</span>`;
-    notify('✅ Re-sync iniciado, esperá unos minutos');
+    el.innerHTML = `<span style="color:var(--wa)">✅ ${res.message || 'Re-sync solicitado — los mensajes aparecerán en los próximos minutos'}</span>`;
+    notify('✅ Re-sync iniciado');
     document.getElementById('sys-pwd-seed').value = '';
+    // Mostrar banner de sincronización para que el usuario sepa que está en proceso
+    showSyncBanner();
   } else {
     el.innerHTML = `<span style="color:var(--red)">${res?.error || 'Error'}</span>`;
     notify(res?.error || 'Error', 'error');
+  }
+}
+
+async function systemFixNames() {
+  const pwd = document.getElementById('sys-pwd-repair')?.value;
+  if (!pwd) { notify('Ingresá tu contraseña primero', 'warning'); return; }
+  const el = document.getElementById('repair-result');
+  if (el) el.textContent = 'Reparando nombres...';
+  const res = await apiFetch('/system/fix-names', { method: 'POST', body: JSON.stringify({ password: pwd }) });
+  if (res?.ok) {
+    notify('✅ Nombres reparados');
+    if (el) el.textContent = res.message || 'Nombres actualizados desde historial';
+    loadConversations();
+  } else {
+    notify(res?.error || 'Error', 'error');
+    if (el) el.textContent = res?.error || 'Error';
   }
 }
 
@@ -2601,6 +2787,16 @@ async function systemReset() {
   } else {
     notify(res?.error || 'Error', 'error');
   }
+}
+
+
+// ─── Versión del sistema ──────────────────────────────────────
+const APP_VERSION = '2.1.0';
+const APP_BUILD   = '20260315';
+
+function showVersion() {
+  const el = document.getElementById('app-version');
+  if (el) el.title = `Build ${APP_BUILD}`;
 }
 
 // ═══════════════════════════════════════════════════════════════

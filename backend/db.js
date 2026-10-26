@@ -190,6 +190,8 @@ async function createTables() {
       jid TEXT UNIQUE NOT NULL,
       contact_id INTEGER,
       wa_push_name TEXT,
+      is_group INTEGER DEFAULT 0,
+      group_name TEXT,
       status TEXT DEFAULT 'open',
       assigned_to INTEGER,
       unread_count INTEGER DEFAULT 0,
@@ -197,6 +199,7 @@ async function createTables() {
       last_message_at TEXT,
       bot_state TEXT DEFAULT 'idle',
       bot_collected TEXT DEFAULT '{}',
+      ai_disabled INTEGER DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')),
       updated_at TEXT DEFAULT (datetime('now'))
     )`,
@@ -217,6 +220,9 @@ async function createTables() {
       is_read INTEGER DEFAULT 0,
       is_auto_reply INTEGER DEFAULT 0,
       sent_by INTEGER,
+      sender_jid TEXT,
+      sender_name TEXT,
+      media_data TEXT,
       created_at TEXT DEFAULT (datetime('now'))
     )`,
     `CREATE TABLE IF NOT EXISTS campaigns (
@@ -471,6 +477,14 @@ async function runMigrations() {
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS wa_push_name TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disabled INTEGER DEFAULT 0`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id ON messages(message_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(jid, timestamp DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_jid ON conversations(jid)`,
+    `CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)`,
+    `CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(jid, timestamp DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_updated ON conversations(updated_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_conv_jid ON conversations(jid)`,
+    `CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone)`,
     // CRÍTICO: timestamp en milisegundos supera el rango de INTEGER (32-bit). Necesita BIGINT.
     `ALTER TABLE messages ALTER COLUMN timestamp TYPE BIGINT`,
     `CREATE TABLE IF NOT EXISTS ai_documents (
@@ -484,10 +498,10 @@ async function runMigrations() {
     )`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
-    // ── v2: Grupos WhatsApp ──────────────────────────────────────
+    // Grupos
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
-    // ── v2: Sender por mensaje (grupos multi-participante) ───────
+    // Sender en mensajes de grupo
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
     `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
     // ── v3: clasificación IA ─────────────────────────────────────
@@ -505,6 +519,9 @@ async function runMigrations() {
     `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS created_by INTEGER`,
     `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS updated_at BIGINT`,
     `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS last_fetched_at BIGINT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_data TEXT`,
+    // Timezone para auto-reply
+    `ALTER TABLE auto_reply_config ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Madrid'`,
   ];
   for (const raw of migrations) {
     // SQLite no soporta IF NOT EXISTS en ADD COLUMN ni ALTER COLUMN TYPE: se intenta y se ignora el error

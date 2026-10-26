@@ -26,10 +26,6 @@
   --wa-light:  #dcfce7;
   --wa-mid:    #86efac;
 
-  /* ─ Acento primario (indigo) ─ */
-  --primary:   #6366f1;
-  --primary-light: #a5b4fc;
-
   /* ─ Estados ─ */
   --blue:      #3b82f6;
   --blue-light: #dbeafe;
@@ -695,28 +691,93 @@ html, body {
   font-family: 'JetBrains Mono', monospace;
 }
 
-/* ── v2: Nombre del sender en mensajes de grupo ── */
+/* Nombre del hablante en mensajes de grupo */
 .msg-sender-name {
   font-size: 11px;
   font-weight: 600;
   color: var(--primary);
   margin-bottom: 2px;
   padding-left: 2px;
+  opacity: 0.85;
 }
 
-/* ── v2: Badge "grupo" en la lista de conversaciones ── */
-.group-badge {
-  font-size: 9px;
-  font-weight: 700;
-  background: rgba(99,102,241,0.15);
-  color: var(--primary);
-  border: 1px solid rgba(99,102,241,0.3);
-  border-radius: 4px;
-  padding: 1px 5px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  flex-shrink: 0;
-  line-height: 1.4;
+/* Mensajes enviados desde el móvil / otra sesión WA */
+.msg-agent-mobile {
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.7;
+}
+.msg-wrap.from-device .msg-bubble {
+  opacity: 0.88;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+
+/* ─── Media en mensajes ─────────────────────────────────────── */
+.msg-image {
+  max-width: 260px;
+  max-height: 260px;
+  border-radius: 8px;
+  display: block;
+  cursor: zoom-in;
+  object-fit: cover;
+}
+.msg-video {
+  max-width: 280px;
+  max-height: 200px;
+  border-radius: 8px;
+  display: block;
+}
+.msg-media {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.media-caption {
+  font-size: 13px;
+  margin-top: 4px;
+  word-break: break-word;
+}
+.media-error {
+  font-size: 12px;
+  color: var(--text3);
+  font-style: italic;
+}
+.msg-audio {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+}
+.msg-audio-player {
+  width: 100%;
+  max-width: 280px;
+  height: 36px;
+  border-radius: 20px;
+}
+.audio-label {
+  font-size: 12px;
+  color: var(--text3);
+  margin-left: 4px;
+}
+.msg-document {
+  display: flex;
+  align-items: center;
+}
+.msg-doc-link {
+  color: inherit;
+  text-decoration: none;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: rgba(255,255,255,0.1);
+  border-radius: 8px;
+  word-break: break-all;
+}
+.msg-doc-link:hover {
+  background: rgba(255,255,255,0.2);
+  text-decoration: underline;
 }
 
 .remote-typing {
@@ -1621,4 +1682,172 @@ textarea.input { resize: vertical; line-height: 1.5; }
   display: inline-block;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
+}
+
+/* ─── Estado enviando mensaje ─────────────────────── */
+.msg-wrap.msg-sending .msg-bubble {
+  opacity: 0.65;
+}
+.msg-wrap.msg-sending .msg-time::after {
+  content: ' ⌛';
+}
+.msg-wrap.msg-failed .msg-bubble {
+  background: var(--red-light) !important;
+  color: var(--red) !important;
+  border-color: var(--red) !important;
+}
+.msg-wrap.msg-failed .msg-time::after {
+  content: ' ✕ error';
+  color: var(--red);
+}
+
+/* ─── Mejoras burbuja de mensajes ────────────────── */
+.msg-bubble {
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+.msg-wrap.out .msg-bubble {
+  background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+}
+.msg-wrap.in .msg-bubble {
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+/* ─── Chat list hover mejorado ───────────────────── */
+.chat-item {
+  transition: background 0.12s, transform 0.08s;
+}
+.chat-item:hover {
+  background: var(--surface2);
+  transform: translateX(2px);
+}
+.chat-item.active {
+  background: linear-gradient(90deg, var(--wa-light) 0%, #f0fdf4 100%);
+}
+
+/* ─── Input de mensaje ───────────────────────────── */
+#msg-input {
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+#msg-input:focus {
+  border-color: var(--wa);
+  box-shadow: 0 0 0 3px rgba(22,163,74,0.12);
+}
+#msg-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ─── Send button feedback ───────────────────────── */
+#send-btn {
+  transition: background 0.15s, transform 0.1s, opacity 0.15s;
+}
+#send-btn:hover:not(:disabled) {
+  transform: scale(1.05);
+}
+#send-btn:active:not(:disabled) {
+  transform: scale(0.95);
+}
+#send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Mensajes: separador de fecha mejorado ──────── */
+.msg-date-sep {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text3);
+  margin: 12px 0 8px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.msg-date-sep::before,
+.msg-date-sep::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* ─── Audio player mejorado ──────────────────────── */
+.msg-audio-player {
+  accent-color: var(--wa);
+}
+.msg-audio {
+  background: var(--surface2);
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+
+/* ─── Imagen en mensaje ──────────────────────────── */
+.msg-image {
+  cursor: zoom-in;
+  transition: transform 0.15s, box-shadow 0.15s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+}
+.msg-image:hover {
+  transform: scale(1.02);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+}
+
+/* ─── Notificaciones toast mejoradas ─────────────── */
+.notify-toast {
+  animation: toastIn 0.25s cubic-bezier(0.34,1.56,0.64,1) forwards;
+}
+@keyframes toastIn {
+  from { transform: translateX(120%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+/* ─── Scrollbar personalizada ────────────────────── */
+.chat-list::-webkit-scrollbar,
+.messages-area::-webkit-scrollbar,
+#messages-area::-webkit-scrollbar {
+  width: 4px;
+}
+.chat-list::-webkit-scrollbar-track,
+.messages-area::-webkit-scrollbar-track,
+#messages-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-list::-webkit-scrollbar-thumb,
+.messages-area::-webkit-scrollbar-thumb,
+#messages-area::-webkit-scrollbar-thumb {
+  background: var(--border2);
+  border-radius: 4px;
+}
+.chat-list::-webkit-scrollbar-thumb:hover,
+#messages-area::-webkit-scrollbar-thumb:hover {
+  background: var(--text3);
+}
+
+/* ─── Dark mode (sistema) ────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #0f172a;
+    --surface:   #1e293b;
+    --surface2:  #263347;
+    --surface3:  #334155;
+    --border:    #334155;
+    --border2:   #475569;
+    --text:      #f1f5f9;
+    --text2:     #94a3b8;
+    --text3:     #64748b;
+    --text4:     #475569;
+    --wa-light:  #14532d;
+    --blue-light: #1e3a5f;
+    --amber-light: #451a03;
+    --red-light:  #450a0a;
+  }
+  .msg-wrap.in .msg-bubble {
+    background: var(--surface2);
+    border-color: var(--border2);
+  }
+  .login-card, .modal-box {
+    background: var(--surface);
+  }
 }

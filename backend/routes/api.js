@@ -11,7 +11,7 @@ const path = require('path');
 const os = require('os');
 
 const { query, queryOne, USE_PG } = require('../db');
-const { sendMessage, sendGroupMessage, sendFile, getStatus, logout, normalizePhone } = require('../baileys');
+const { sendMessage, sendGroupMessage, sendFile, getStatus, logout, normalizePhone, getSock } = require('../baileys');
 const { runCampaign, isRunning, requestCancel } = require('../sender');
 const { requireAuth, requireAdmin } = require('../middleware/auth');
 const { apiKeyAuth } = require('../integrations');
@@ -41,6 +41,15 @@ const fileUpload = multer({
 // ─── WhatsApp ─────────────────────────────────────────────────────────────────
 
 router.get('/wa/status', requireAuth, (req, res) => res.json(getStatus()));
+
+router.get('/wa/qr', requireAuth, async (req, res) => {
+  const { status, qr } = getStatus();
+  if (status === 'qr' && qr) {
+    res.json({ qr, status });
+  } else {
+    res.json({ status, qr: null });
+  }
+});
 
 router.post('/wa/logout', requireAuth, requireAdmin, async (req, res) => {
   await logout();
@@ -136,45 +145,91 @@ router.post('/contacts', requireAuth, async (req, res) => {
   const { phone, name, company, extra, notes } = req.body;
   if (!phone) return res.status(400).json({ error: 'Telefono requerido' });
   const clean = normalizePhone(phone);
-  await query(
-    'INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
-    [clean, name || '', company || '', extra || '', notes || '']
-  );
-  // Si ya existía, actualizar datos
-  await query(
-    'UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE phone = ? AND (name = \'\' OR name IS NULL OR name = phone)',
-    [name || '', company || '', extra || '', notes || '', clean]
-  );
+  try {
+    // PG: upsert real
+    await query(
+      `INSERT INTO contacts (phone, name, company, extra, notes)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (phone) DO UPDATE SET
+         name = EXCLUDED.name,
+         company = EXCLUDED.company,
+         extra = EXCLUDED.extra,
+         notes = EXCLUDED.notes,
+         updated_at = NOW()`,
+      [clean, name || '', company || '', extra || '', notes || '']
+    );
+  } catch(e) {
+    // SQLite fallback
+    await query('INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
+      [clean, name || '', company || '', extra || '', notes || '']);
+    await query('UPDATE contacts SET name=?, company=?, extra=?, notes=?, updated_at=datetime(\'now\') WHERE phone=?',
+      [name || '', company || '', extra || '', notes || '', clean]);
+  }
   const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [clean]);
+  // Actualizar wa_push_name en la conversación si existe, para que el nombre aparezca inmediatamente
+  if (c && name) {
+    await query(
+      'UPDATE conversations SET contact_id = ?, wa_push_name = ? WHERE jid LIKE ? OR jid LIKE ?',
+      [c.id, name, clean + '%', c.phone + '%']
+    ).catch(() => {});
+  }
   res.json(c);
 });
 
 router.put('/contacts/:id', requireAuth, async (req, res) => {
   const { name, company, extra, notes } = req.body;
-  await query('UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE id = ?',
+  await query('UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = NOW() WHERE id = ?',
     [name, company, extra, notes, req.params.id]);
-  res.json({ ok: true });
+  // Actualizar wa_push_name en conversaciones de este contacto
+  if (name) {
+    await query(
+      'UPDATE conversations SET wa_push_name = ? WHERE contact_id = ?',
+      [name, req.params.id]
+    ).catch(() => {});
+  }
+  res.json({ ok: true, reload: true });
 });
 
 // Guardar contacto desde conversación (upsert por JID/phone)
 router.post('/contacts/from-conversation', requireAuth, async (req, res) => {
   const { jid, name, company, extra, notes } = req.body;
   if (!jid) return res.status(400).json({ error: 'jid requerido' });
-  const phone = normalizePhone(jid.split('@')[0]);
-  await query(
-    'INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
-    [phone, name || phone, company || '', extra || '', notes || '']
-  );
-  await query(
-    'UPDATE contacts SET name = ?, company = ?, extra = ?, notes = ?, updated_at = datetime(\'now\') WHERE phone = ?',
-    [name || phone, company || '', extra || '', notes || '', phone]
-  );
-  const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [phone]);
-  // Vincular con la conversación
-  if (c) {
-    await query('UPDATE conversations SET contact_id = ? WHERE jid = ?', [c.id, jid]);
+  
+  // Para @lid el "phone" del JID no es real — usar el phone del contacto si ya existe
+  const isLid = jid.endsWith('@lid');
+  const rawPhone = jid.split('@')[0];
+  const phone = isLid ? rawPhone : normalizePhone(rawPhone);
+
+  try {
+    // Upsert PostgreSQL
+    await query(
+      `INSERT INTO contacts (phone, name, company, extra, notes)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (phone) DO UPDATE SET
+         name = EXCLUDED.name,
+         company = COALESCE(NULLIF(EXCLUDED.company,''), contacts.company),
+         extra = COALESCE(NULLIF(EXCLUDED.extra,''), contacts.extra),
+         notes = COALESCE(NULLIF(EXCLUDED.notes,''), contacts.notes),
+         updated_at = NOW()`,
+      [phone, name || '', company || '', extra || '', notes || '']
+    );
+  } catch(e) {
+    // Fallback SQLite
+    await query('INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
+      [phone, name || '', company || '', extra || '', notes || '']);
+    await query('UPDATE contacts SET name=?, company=?, extra=?, notes=?, updated_at=datetime(\'now\') WHERE phone=?',
+      [name || '', company || '', extra || '', notes || '', phone]);
   }
-  res.json(c);
+  
+  const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [phone]);
+  if (c) {
+    // Vincular conversación + actualizar wa_push_name para que aparezca en la lista
+    await query(
+      `UPDATE conversations SET contact_id = ?, wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?`,
+      [c.id, name || null, jid]
+    );
+  }
+  res.json({ ...(c || {}), ok: true });
 });
 
 router.delete('/contacts/:id', requireAuth, requireAdmin, async (req, res) => {
@@ -250,8 +305,12 @@ router.get('/conversations', requireAuth, async (req, res) => {
 
   let sql = `
     SELECT cv.*,
-      ${displayName} as contact_name,
-      COALESCE(c.phone, ${phoneFromJid}) as contact_phone,
+      CASE WHEN cv.is_group = 1 THEN COALESCE(cv.group_name, ${phoneFromJid})
+           ELSE ${displayName}
+      END as contact_name,
+      CASE WHEN cv.is_group = 1 THEN NULL
+           ELSE COALESCE(c.phone, ${phoneFromJid})
+      END as contact_phone,
       c.name as contact_saved_name,
       c.company as company,
       u.display_name as assigned_name, u.color as assigned_color
@@ -265,11 +324,11 @@ router.get('/conversations', requireAuth, async (req, res) => {
   if (assigned === 'me') { sql += ' AND cv.assigned_to = ?'; params.push(req.session.user.id); }
   if (search) {
     if (USE_PG) {
-      sql += ` AND (c.name ILIKE ? OR c.phone LIKE ? OR cv.wa_push_name ILIKE ? OR cv.last_message ILIKE ? OR ${phoneFromJid} LIKE ?)`;
+      sql += ` AND (c.name ILIKE ? OR c.phone LIKE ? OR cv.wa_push_name ILIKE ? OR cv.last_message ILIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name ILIKE ?)`;
     } else {
-      sql += ` AND (c.name LIKE ? OR c.phone LIKE ? OR cv.wa_push_name LIKE ? OR cv.last_message LIKE ? OR ${phoneFromJid} LIKE ?)`;
+      sql += ` AND (c.name LIKE ? OR c.phone LIKE ? OR cv.wa_push_name LIKE ? OR cv.last_message LIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name LIKE ?)`;
     }
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
   sql += ' ORDER BY cv.last_message_at DESC LIMIT 200';
 
@@ -279,7 +338,19 @@ router.get('/conversations', requireAuth, async (req, res) => {
       const labels = await query(`
         SELECT l.id, l.name, l.color FROM conversation_labels cvl
         JOIN labels l ON cvl.label_id = l.id WHERE cvl.conversation_id = ?`, [row.id]);
-      if (!row.contact_name) row.contact_name = row.jid.split('@')[0];
+      if (!row.contact_name || row.contact_name === row.jid.split('@')[0]) {
+        const rawId = row.jid.split('@')[0];
+        const isLid = row.jid.endsWith('@lid');
+        if (isLid) {
+          // LID de WA (contacto con privacidad) — mostrar pushName o 'Contacto'
+          row.contact_name = row.wa_push_name || 'Contacto privado';
+        } else if (/^\d+$/.test(rawId)) {
+          // Número real — mostrar con +
+          row.contact_name = row.wa_push_name || `+${rawId}`;
+        } else {
+          row.contact_name = rawId;
+        }
+      }
       return { ...row, labels };
     }));
     res.json(result);
@@ -287,7 +358,12 @@ router.get('/conversations', requireAuth, async (req, res) => {
     console.error('Error en GET /conversations:', e.message);
     try {
       const rows = await query(`SELECT * FROM conversations ORDER BY last_message_at DESC LIMIT 200`);
-      res.json(rows.map(r => ({ ...r, labels: [], contact_name: r.wa_push_name || r.jid.split('@')[0] })));
+      res.json(rows.map(r => {
+          const rawId = r.jid.split('@')[0];
+          const isLid = r.jid.endsWith('@lid');
+          const name = r.wa_push_name || (isLid ? 'Contacto privado' : (/^\d+$/.test(rawId) ? `+${rawId}` : rawId));
+          return { ...r, labels: [], contact_name: name };
+        }));
     } catch (e2) {
       res.status(500).json({ error: e2.message });
     }
@@ -295,17 +371,25 @@ router.get('/conversations', requireAuth, async (req, res) => {
 });
 
 router.get('/conversations/:jid/messages', requireAuth, async (req, res) => {
-  // NOTA: evitar ::bigint que es sintaxis solo PostgreSQL — el cast lo hacemos en JS
-  const msgs = await query(`
+  const jidParam = decodeURIComponent(req.params.jid);
+  const msgs = await query(USE_PG ? `
     SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
-           m.timestamp,
-           m.is_read, m.is_auto_reply, m.sent_by, m.created_at,
-           m.sender_jid, m.sender_name,
+           m.timestamp::bigint as timestamp,
+           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name,
+           m.media_data, m.created_at,
            u.display_name as sent_by_name, u.color as sent_by_color
     FROM messages m LEFT JOIN users u ON m.sent_by = u.id
     WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
-  `, [decodeURIComponent(req.params.jid)]);
-  // Asegurar que timestamp es siempre número (puede llegar como string de PG BIGINT)
+  ` : `
+    SELECT m.id, m.message_id, m.jid, m.direction, m.type, m.content,
+           m.timestamp,
+           m.is_read, m.is_auto_reply, m.sent_by, m.sender_jid, m.sender_name,
+           m.media_data, m.created_at,
+           u.display_name as sent_by_name, u.color as sent_by_color
+    FROM messages m LEFT JOIN users u ON m.sent_by = u.id
+    WHERE m.jid = ? ORDER BY m.timestamp ASC LIMIT 300
+  `, [jidParam]);
+  // Asegurar que timestamp es siempre número
   res.json(msgs.map(m => ({ ...m, timestamp: Number(m.timestamp) || 0 })));
 });
 
@@ -365,16 +449,24 @@ router.delete('/conversations/:jid', requireAuth, async (req, res) => {
 
 router.post('/send', requireAuth, async (req, res) => {
   const { phone, message, jid } = req.body;
-  const target = phone || (jid ? jid.split('@')[0] : null);
-  if (!target || !message) return res.status(400).json({ error: 'phone/jid y message requeridos' });
+  if (!message) return res.status(400).json({ error: 'message requerido' });
   try {
-    // Detectar grupos por JID completo
+    // Grupos
     if (jid && jid.endsWith('@g.us')) {
       await sendGroupMessage(jid, message, req.session.user.id);
-    } else {
-      const cleanPhone = normalizePhone(target);
-      await sendMessage(cleanPhone, message, req.session.user.id);
+      return res.json({ ok: true });
     }
+    // JID completo (@lid o @s.whatsapp.net) — pasar directamente a sendMessage
+    // sendMessage ahora acepta JID completo o número suelto
+    if (jid && jid.includes('@')) {
+      await sendMessage(jid, message, req.session.user.id);
+      return res.json({ ok: true });
+    }
+    // Solo número: normalizar
+    const target = phone || (jid ? jid.split('@')[0] : null);
+    if (!target) return res.status(400).json({ error: 'phone o jid requerido' });
+    const cleanPhone = normalizePhone(target);
+    await sendMessage(cleanPhone, message, req.session.user.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -413,10 +505,10 @@ router.post('/campaigns', requireAuth, async (req, res) => {
   if (!name || !template) return res.status(400).json({ error: 'name y template requeridos' });
 
   const rows = await query(
-    'INSERT INTO campaigns (name, type, template, delay_min, delay_max, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO campaigns (name, type, template, delay_min, delay_max, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id',
     [name, type || 'general', template, delay_min || 8, delay_max || 25, scheduled_at || null, req.session.user.id]
   );
-  const campaignId = rows[0]?.lastInsertRowid;
+  const campaignId = rows[0]?.id || rows[0]?.lastInsertRowid;
 
   if (contactList?.length) {
     for (const c of contactList) {
@@ -489,10 +581,40 @@ router.post('/campaigns/:id/reset', requireAuth, async (req, res) => {
   const camp = await queryOne('SELECT status FROM campaigns WHERE id = ?', [req.params.id]);
   if (camp?.status === 'running') return res.status(409).json({ error: 'Campaña en curso' });
   await query("UPDATE campaign_contacts SET status = 'pending', sent_at = NULL, error = NULL WHERE campaign_id = ?", [req.params.id]);
-  await query("UPDATE campaigns SET status = 'draft', sent = 0, failed = 0 WHERE id = ?", [req.params.id]);
+  const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [req.params.id]);
+  await query("UPDATE campaigns SET status = 'draft', sent = 0, failed = 0, total = ? WHERE id = ?", [cnt?.n || 0, req.params.id]);
   res.json({ ok: true });
 });
 
+
+// Duplicar campaña — copia config + contactos como draft
+router.post('/campaigns/:id/duplicate', requireAuth, async (req, res) => {
+  const src = await queryOne('SELECT * FROM campaigns WHERE id = ?', [req.params.id]);
+  if (!src) return res.status(404).json({ error: 'Campaña no encontrada' });
+
+  const rows = await query(
+    'INSERT INTO campaigns (name, type, template, delay_min, delay_max, created_by) VALUES (?, ?, ?, ?, ?, ?) RETURNING id',
+    [`${src.name} (copia)`, src.type, src.template, src.delay_min, src.delay_max, req.session.user.id]
+  );
+  const newId = rows[0]?.id || rows[0]?.lastInsertRowid;
+  if (!newId) return res.status(500).json({ error: 'Error creando copia' });
+
+  // Copiar todos los contactos como pending
+  const contacts = await query(
+    'SELECT phone, name, extra_field, contact_id FROM campaign_contacts WHERE campaign_id = ?',
+    [req.params.id]
+  );
+  for (const c of contacts) {
+    await query(
+      'INSERT INTO campaign_contacts (campaign_id, contact_id, phone, name, extra_field) VALUES (?, ?, ?, ?, ?)',
+      [newId, c.contact_id || null, c.phone, c.name || '', c.extra_field || '']
+    );
+  }
+  const cnt = await queryOne('SELECT COUNT(*) as n FROM campaign_contacts WHERE campaign_id = ?', [newId]);
+  await query('UPDATE campaigns SET total = ? WHERE id = ?', [cnt?.n || 0, newId]);
+
+  res.json({ id: newId, ok: true });
+});
 
 router.get('/campaigns/:id/contacts', requireAuth, async (req, res) => {
   res.json(await query('SELECT * FROM campaign_contacts WHERE campaign_id = ? ORDER BY id', [req.params.id]));
@@ -531,6 +653,65 @@ router.post('/campaigns/:id/import', requireAuth, upload.single('file'), async (
   res.json({ imported: count });
 });
 
+// ─── Media download ──────────────────────────────────────────────────────────
+// Descarga media de WhatsApp en tiempo real usando las claves almacenadas
+
+router.get('/messages/:messageId/media', requireAuth, async (req, res) => {
+  try {
+    const msg = await queryOne(
+      'SELECT media_data, type FROM messages WHERE message_id = ?',
+      [req.params.messageId]
+    );
+    if (!msg?.media_data) return res.status(404).json({ error: 'Media no disponible' });
+
+    const media = JSON.parse(msg.media_data);
+    if (!media?.mediaKey) return res.status(404).json({ error: 'Claves de media no disponibles' });
+
+    // Reconstruir el objeto que necesita Baileys para descargar
+    const downloadable = {
+      mediaKey: Buffer.from(media.mediaKey, 'base64'),
+      url: media.url,
+      directPath: media.directPath,
+      fileEncSha256: media.fileEncSha256 ? Buffer.from(media.fileEncSha256, 'base64') : null,
+      fileSha256: media.fileSha256 ? Buffer.from(media.fileSha256, 'base64') : null,
+    };
+
+    // Mapear tipo de mensaje al tipo de media para Baileys
+    const mediaTypeMap = {
+      imageMessage:    'image',
+      videoMessage:    'video',
+      audioMessage:    'audio',
+      documentMessage: 'document',
+      stickerMessage:  'sticker',
+    };
+    const baileyType = mediaTypeMap[msg.type] || 'document';
+
+    // Importar Baileys dinámicamente (ESM)
+    const { downloadContentFromMessage } = await import('@whiskeysockets/baileys');
+
+    const stream = await downloadContentFromMessage(downloadable, baileyType);
+
+    // Setear headers
+    const mimeType = media.mimetype || 'application/octet-stream';
+    res.setHeader('Content-Type', mimeType);
+    if (media.fileName) {
+      res.setHeader('Content-Disposition', `inline; filename="${media.fileName}"`);
+    }
+    if (media.fileLength) {
+      res.setHeader('Content-Length', media.fileLength);
+    }
+
+    // Pipe el stream al response
+    for await (const chunk of stream) {
+      res.write(chunk);
+    }
+    res.end();
+  } catch(e) {
+    console.error('[media download]', e.message);
+    res.status(500).json({ error: 'Error descargando media: ' + e.message });
+  }
+});
+
 // ─── Quick Replies ────────────────────────────────────────────────────────────
 
 router.get('/quick-replies', requireAuth, async (req, res) => res.json(await query('SELECT * FROM quick_replies ORDER BY category, name')));
@@ -559,17 +740,18 @@ router.get('/auto-reply', requireAuth, async (req, res) => {
 });
 
 router.put('/auto-reply', requireAuth, async (req, res) => {
-  const { is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields } = req.body;
+  const { is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields, timezone } = req.body;
   const existing = await queryOne('SELECT id FROM auto_reply_config LIMIT 1');
+  const fields = JSON.stringify(Array.isArray(collect_fields) ? collect_fields : [collect_fields].filter(Boolean));
   if (existing) {
     await query(
-      'UPDATE auto_reply_config SET is_active=?, schedule_start=?, schedule_end=?, working_days=?, greeting_message=?, collect_fields=?, updated_at=datetime(\'now\') WHERE id=1',
-      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, JSON.stringify(collect_fields)]
+      'UPDATE auto_reply_config SET is_active=?, schedule_start=?, schedule_end=?, working_days=?, greeting_message=?, collect_fields=?, timezone=COALESCE(?,timezone), updated_at=NOW() WHERE id=1',
+      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, fields, timezone || null]
     );
   } else {
     await query(
-      'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields) VALUES (?,?,?,?,?,?)',
-      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, JSON.stringify(collect_fields)]
+      'INSERT INTO auto_reply_config (is_active, schedule_start, schedule_end, working_days, greeting_message, collect_fields, timezone) VALUES (?,?,?,?,?,?,?)',
+      [is_active ? 1 : 0, schedule_start, schedule_end, working_days || '1,2,3,4,5', greeting_message, fields, timezone || 'Europe/Madrid']
     );
   }
   res.json({ ok: true });
@@ -956,12 +1138,6 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
     `UPDATE users SET is_active = 1 WHERE is_active IS NULL`,
     // Asegurar que conversations tiene columnas de timestamps
     `UPDATE conversations SET last_message_at = NOW() WHERE last_message_at IS NULL AND last_message IS NOT NULL`,
-    // ── v2: Grupos WhatsApp ──
-    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
-    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
-    // ── v2: Sender por mensaje (grupos) ──
-    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
-    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
     // Limpiar nombres de contactos que son iguales al teléfono (fallback anterior incorrecto)
     // Los setea a NULL para que la UI muestre el push_name de WA
     `UPDATE contacts SET name = NULL WHERE name = phone AND phone IS NOT NULL`,
@@ -970,14 +1146,33 @@ router.post('/system/repair-db', requireAuth, requireAdmin, async (req, res) => 
       SELECT c.name FROM contacts c WHERE c.id = conversations.contact_id AND c.name IS NOT NULL
     ) WHERE wa_push_name IS NULL AND contact_id IS NOT NULL`,
     // Eliminar conversaciones "fantasma" creadas por JIDs raros de onWhatsApp()
-    // Son conversaciones sin mensajes propios y sin last_message real, con JIDs numéricos raros
-    // (ej: 889058291715 — 12 dígitos, no corresponde a ningún código de país válido)
     `DELETE FROM conversations WHERE
       id NOT IN (SELECT DISTINCT conversation_id FROM conversation_labels WHERE conversation_id IS NOT NULL)
       AND last_message IS NULL
       AND unread_count = 0
       AND contact_id IS NULL
       AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.jid = conversations.jid)`,
+    // Nuevas columnas — grupos y sender
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_group INTEGER DEFAULT 0`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS group_name TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary TEXT`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_summary_at TIMESTAMPTZ`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_jid TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS sender_name TEXT`,
+    `ALTER TABLE messages ADD COLUMN IF NOT EXISTS media_data TEXT`,
+    `ALTER TABLE auto_reply_config ADD COLUMN IF NOT EXISTS timezone TEXT DEFAULT 'Europe/Madrid'`,
+    // Limpiar contactos creados con @lid como teléfono (números raros como 258978055516407)
+    // Son contactos cuyo phone no empieza con código de país válido (< 7 dígitos o > 15 dígitos)
+    // y cuya conversación asociada usa @lid — se elimina el contacto ficticio, no la conversación
+    `UPDATE conversations SET contact_id = NULL
+     WHERE contact_id IN (
+       SELECT id FROM contacts
+       WHERE length(phone) > 13 AND phone NOT SIMILAR TO '54[0-9]+|34[0-9]+|39[0-9]+|55[0-9]+|1[0-9]+'
+     )`,
+    `DELETE FROM contacts
+     WHERE length(phone) > 13
+       AND phone NOT SIMILAR TO '54[0-9]+|34[0-9]+|39[0-9]+|55[0-9]+|1[0-9]+'
+       AND id NOT IN (SELECT DISTINCT contact_id FROM conversations WHERE contact_id IS NOT NULL)`,
   ];
 
   for (const sql of ops) {
@@ -1115,6 +1310,67 @@ router.post('/system/resync-history', requireAuth, requireAdmin, async (req, res
     const { requestHistoryResync } = require('../baileys');
     await requestHistoryResync();
     res.json({ ok: true, message: 'Re-sincronización solicitada. Los mensajes aparecerán en los próximos minutos.' });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Reparar nombres: poblar wa_push_name desde mensajes existentes ────────────
+router.post('/system/fix-names', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    // Actualizar wa_push_name en conversaciones que tienen sender_name en mensajes
+    // pero no tienen wa_push_name guardado
+    const updated = await query(`
+      UPDATE conversations SET wa_push_name = sq.push_name
+      FROM (
+        SELECT DISTINCT ON (m.jid) m.jid, m.sender_name as push_name
+        FROM messages m
+        WHERE m.direction = 'in'
+          AND m.sender_name IS NOT NULL
+          AND m.sender_name != ''
+          AND NOT m.jid LIKE '%@g.us%'
+        ORDER BY m.jid, m.timestamp DESC
+      ) sq
+      WHERE conversations.jid = sq.jid
+        AND (conversations.wa_push_name IS NULL OR conversations.wa_push_name = '')
+    `).catch(() => null);
+
+    // Para SQLite
+    if (!updated) {
+      const msgs = await query(`
+        SELECT jid, sender_name FROM messages
+        WHERE direction = 'in' AND sender_name IS NOT NULL AND sender_name != ''
+          AND jid NOT LIKE '%@g.us%'
+        GROUP BY jid ORDER BY MAX(timestamp) DESC
+      `);
+      let count = 0;
+      for (const m of msgs) {
+        await query(
+          `UPDATE conversations SET wa_push_name = ? WHERE jid = ? AND (wa_push_name IS NULL OR wa_push_name = '')`,
+          [m.sender_name, m.jid]
+        ).catch(() => {});
+        count++;
+      }
+      return res.json({ ok: true, updated: count, note: 'SQLite mode' });
+    }
+
+    res.json({ ok: true, message: 'Nombres actualizados desde historial de mensajes' });
+  } catch(e) {
+    console.error('[fix-names]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── Reset completo de auth para forzar historial desde cero ──────────────────
+router.post('/system/full-reset-auth', requireAuth, requireAdmin, async (req, res) => {
+  const { password } = req.body;
+  const adminUser = await queryOne('SELECT password_hash FROM users WHERE id = ?', [req.session.user.id]);
+  const valid = adminUser && await bcrypt.compare(password, adminUser.password_hash);
+  if (!valid) return res.status(403).json({ error: 'Contraseña incorrecta' });
+  try {
+    const { fullResetAuth } = require('../baileys');
+    await fullResetAuth();
+    res.json({ ok: true, message: 'Credenciales borradas. Escaneá el QR que aparecerá. WhatsApp enviará historial completo al re-vincular.' });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
