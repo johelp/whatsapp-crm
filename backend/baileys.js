@@ -50,6 +50,20 @@ let qrData = null;
 let connectionStatus = 'disconnected';
 let reconnectTimer = null;
 let reconnectAttempts = 0;
+let authRegistered = false;     // ¿la sesión ya está vinculada a un número? (false = todavía mostrando QR / vinculando)
+
+/**
+ * Cuánto esperar antes de reconectar.
+ *  - 515 (restartRequired): WhatsApp lo envía JUSTO DESPUÉS de escanear el QR; hay que reconectar de inmediato
+ *    para terminar la vinculación (una espera larga la hace fallar).
+ *  - Sesión sin vincular (QR vencido, 408): reconectar enseguida para ofrecer un QR nuevo y vigente.
+ *  - Sesión vinculada con fallas reales: espera creciente (2 s … 2 min) para no martillar a WhatsApp.
+ */
+function reconnectDelay({ code, registered, attempts }) {
+  if (code === 515) return 300 + Math.random() * 300;
+  if (!registered) return 1500 + Math.random() * 1500;
+  return Math.min(2000 * 2 ** Math.min(attempts - 1, 6), 120000) + Math.random() * 1000;
+}
 const _existsCache = new Map();   // jid → { exists, at }: evita consultar onWhatsApp en cada envío
 
 function setIO(socketIO) { io = socketIO; }
@@ -522,6 +536,7 @@ async function connect() {
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_PATH);
+  authRegistered = !!state.creds?.registered;
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
@@ -571,9 +586,11 @@ async function connect() {
       } else {
         // Otros errores — reconectar con las credenciales existentes, con backoff exponencial
         clearTimeout(reconnectTimer);
-        reconnectAttempts++;
-        const delay = Math.min(2000 * 2 ** Math.min(reconnectAttempts - 1, 6), 120000) + Math.random() * 1000;
-        console.log(`Reconectando en ${Math.round(delay / 1000)}s (intento ${reconnectAttempts}, code ${code})`);
+        const pairing = code === 515 || !authRegistered;      // vinculación en curso: no cuenta como falla
+        if (pairing) reconnectAttempts = 0; else reconnectAttempts++;
+        const delay = reconnectDelay({ code, registered: authRegistered, attempts: Math.max(reconnectAttempts, 1) });
+        console.log(`${pairing ? 'Vinculación en curso — ' : ''}reconectando en ${(delay / 1000).toFixed(1)}s (code ${code}${pairing ? '' : ', intento ' + reconnectAttempts})`);
+        qrData = null;
         reconnectTimer = setTimeout(() => connect().catch(console.error), delay);
       }
       emitEvent('connection.update', { status: 'disconnected', code });
@@ -594,7 +611,7 @@ async function connect() {
     }
   });
 
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('creds.update', () => { authRegistered = !!state.creds?.registered; saveCreds(); });
 
   // ─── HISTORIAL ────────────────────────────────────────────────────────────────
   sock.ev.on('messaging-history.set', async ({ messages: msgs, contacts: histContacts, isLatest }) => {
@@ -1011,4 +1028,4 @@ async function fullResetAuth() {
   return true;
 }
 
-module.exports = { limitHistory, connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };
+module.exports = { reconnectDelay, limitHistory, connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };

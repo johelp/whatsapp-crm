@@ -105,6 +105,14 @@ async function apiFetch(path, opts = {}) {
 socket.on('wa:status', ({ status, phone, qr }) => {
   updateWAStatus(status, phone);
 
+  // Un QR que ya venció no debe quedar visible: se oculta hasta que llegue uno nuevo
+  if (status === 'disconnected' || status === 'connecting') {
+    const stale = document.getElementById('qr-image'), waiting = document.getElementById('qr-waiting');
+    if (stale) stale.style.display = 'none';
+    if (waiting) waiting.style.display = 'flex';
+  }
+  if ((status === 'connected' || status === 'open') && document.getElementById('modal-qr')?.classList.contains('open')) closeModal('modal-qr');
+
   // Si llega con QR adjunto (usuario abrió el browser cuando el QR ya existía)
   if (status === 'qr' && qr) {
     const img = document.getElementById('qr-image');
