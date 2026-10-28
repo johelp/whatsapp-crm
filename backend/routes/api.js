@@ -198,10 +198,23 @@ router.put('/contacts/:id', requireAuth, async (req, res) => {
 
 // Guardar contacto desde conversación (upsert por JID/phone)
 router.post('/contacts/from-conversation', requireAuth, async (req, res) => {
-  const { jid, name, company, extra, notes, phone: phoneIn } = req.body;
+  const { jid, name, company, extra, notes, phone: phoneIn, contact_id: linkId } = req.body;
   if (!jid) return res.status(400).json({ error: 'jid requerido' });
   const identity = require('../identity');
   const isLid = jid.endsWith('@lid');
+
+  // El nombre que ponés vos en el chat se ve SIEMPRE (no depende de la agenda del teléfono ni de que WhatsApp revele el número)
+  if (name && String(name).trim()) await query('UPDATE conversations SET custom_name = ? WHERE jid = ?', [String(name).trim().slice(0, 120), jid]);
+
+  // Vincular con un contacto que ya está agendado en el CRM
+  if (linkId) {
+    const target = await queryOne('SELECT * FROM contacts WHERE id = ?', [linkId]);
+    if (!target) return res.status(404).json({ error: 'Contacto no encontrado' });
+    await query('UPDATE conversations SET contact_id = ? WHERE jid = ?', [target.id, jid]);
+    const realPhone = String(target.phone || '').replace(/\D/g, '');
+    if (isLid && realPhone.length >= 7 && realPhone !== jid.split('@')[0]) await identity.setManualMapping(jid, realPhone).catch(() => {});
+    return res.json({ ...target, ok: true, linked: true });
+  }
 
   // Chat privado (@lid): WhatsApp no comparte el número. Los dígitos del JID NO son un teléfono.
   //  - con el número real → se crea/usa ese contacto, se enlaza el chat y se recuerda la equivalencia
@@ -211,9 +224,8 @@ router.post('/contacts/from-conversation', requireAuth, async (req, res) => {
     const real = String(phoneIn || '').replace(/\D/g, '');
     if (real.length < 7) {
       if (!name) return res.status(400).json({ error: 'Para un chat privado indicá el número real o al menos un nombre' });
-      await query('UPDATE conversations SET wa_push_name = ? WHERE jid = ?', [name, jid]);
       await identity.rememberName(jid, name, 'contact').catch(() => {});
-      return res.json({ ok: true, linked: false, message: 'Nombre guardado en el chat. Agregá el número real para enlazarlo con un contacto.' });
+      return res.json({ ok: true, linked: false, message: 'Nombre guardado en el chat. Si agregás el número real o lo vinculás a un contacto, se enlaza con su ficha.' });
     }
     phone = normalizePhone(real);
   } else {
@@ -325,12 +337,14 @@ router.get('/conversations', requireAuth, async (req, res) => {
     ? `COALESCE(NULLIF(c.name, ${phoneFromJid}), cv.wa_push_name, c.name, ${phoneFromJid})`
     : `COALESCE(CASE WHEN c.name != ${phoneFromJid} THEN c.name ELSE NULL END, cv.wa_push_name, c.name, ${phoneFromJid})`;
 
+  // El nombre que pone el operador en el chat (custom_name) tiene prioridad sobre cualquier otro
   let sql = `
     SELECT cv.*,
       CASE WHEN cv.is_group = 1 THEN COALESCE(cv.group_name, ${phoneFromJid})
-           ELSE ${displayName}
+           ELSE COALESCE(NULLIF(cv.custom_name, ''), ${displayName})
       END as contact_name,
       CASE WHEN cv.is_group = 1 THEN NULL
+           WHEN cv.jid LIKE '%@lid' AND c.phone IS NULL THEN NULL   -- los dígitos de un LID no son un teléfono
            ELSE COALESCE(c.phone, ${phoneFromJid})
       END as contact_phone,
       c.name as contact_saved_name,
@@ -347,11 +361,11 @@ router.get('/conversations', requireAuth, async (req, res) => {
   if (assigned === 'me') { sql += ' AND cv.assigned_to = ?'; params.push(req.session.user.id); }
   if (search) {
     if (USE_PG) {
-      sql += ` AND (c.name ILIKE ? OR c.phone LIKE ? OR cv.wa_push_name ILIKE ? OR cv.last_message ILIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name ILIKE ?)`;
+      sql += ` AND (c.name ILIKE ? OR c.phone LIKE ? OR cv.wa_push_name ILIKE ? OR cv.last_message ILIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name ILIKE ? OR cv.custom_name ILIKE ?)`;
     } else {
-      sql += ` AND (c.name LIKE ? OR c.phone LIKE ? OR cv.wa_push_name LIKE ? OR cv.last_message LIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name LIKE ?)`;
+      sql += ` AND (c.name LIKE ? OR c.phone LIKE ? OR cv.wa_push_name LIKE ? OR cv.last_message LIKE ? OR ${phoneFromJid} LIKE ? OR cv.group_name LIKE ? OR cv.custom_name LIKE ?)`;
     }
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
   sql += ' ORDER BY cv.last_message_at DESC LIMIT 200';
 

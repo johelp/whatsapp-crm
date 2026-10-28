@@ -561,13 +561,15 @@ function renderConversationList() {
     if (isGroup) {
       name = c.group_name || c.contact_name || rawId;
     } else {
+      const customName = c.custom_name && c.custom_name.trim() ? c.custom_name.trim() : null;   // el que puso el operador: manda siempre
       const savedName = c.contact_saved_name && c.contact_saved_name !== rawId
         ? c.contact_saved_name : null;
       const pushName = c.wa_push_name && c.wa_push_name !== rawId
         ? c.wa_push_name : null;
       const contactName = c.contact_name && c.contact_name !== rawId && !/^\d+$/.test(c.contact_name)
         ? c.contact_name : null;
-      if (savedName)       name = savedName;
+      if (customName)      name = customName;
+      else if (savedName)  name = savedName;
       else if (pushName)   name = pushName;
       else if (contactName) name = contactName;
       else if (isLid)      name = 'Contacto privado';
@@ -654,9 +656,10 @@ async function openChat(jid) {
   if (isGroup) {
     displayName = conv?.group_name || conv?.contact_name || phone;
   } else {
-    displayName = conv?.contact_name && conv.contact_name !== phone
-      ? conv.contact_name
-      : (conv?.wa_push_name || conv?.contact_phone || phone);
+    displayName = conv?.custom_name?.trim() ||
+      (conv?.contact_name && conv.contact_name !== phone
+        ? conv.contact_name
+        : (conv?.wa_push_name || conv?.contact_phone || (jid.endsWith('@lid') ? 'Contacto privado' : phone)));
   }
 
   // Header
@@ -669,7 +672,8 @@ async function openChat(jid) {
     avatarEl.style.fontSize = '';
   }
   document.getElementById('ch-name').textContent = displayName;
-  document.getElementById('ch-phone').textContent = isGroup ? `${jid}` : `+${phone}`;
+  // En chats privados (@lid) los dígitos del identificador NO son un teléfono
+  document.getElementById('ch-phone').textContent = isGroup ? `${jid}` : (jid.endsWith('@lid') ? (conv?.contact_phone ? `+${conv.contact_phone}` : 'Número no visible (contacto privado)') : `+${phone}`);
   const aiBox = document.getElementById('ch-ai');
   if (aiBox) aiBox.innerHTML = aiDetail(conv);
   document.getElementById('ch-company').textContent = isGroup ? '👥 Grupo de WhatsApp' : (conv?.company ? `· ${conv.company}` : '');
@@ -1076,6 +1080,9 @@ async function saveContactFromChat() {
     document.getElementById('ct-notes').value = '';
     // Al guardar, usar from-conversation
     window._saveFromChat = S.activeJid;
+    const linkSel = document.getElementById('ct-link');
+    linkSel.innerHTML = '<option value="">— No vincular —</option>' + S.contacts.filter(c => c.name).sort((a, b) => a.name.localeCompare(b.name)).map(c => `<option value="${c.id}">${esc(c.name)} — +${esc(c.phone)}</option>`).join('');
+    document.getElementById('ct-link-field').style.display = isLidChat ? '' : 'none';
     openModal('modal-contact');
   }
 }
@@ -1092,7 +1099,9 @@ async function saveContact() {
   const consentNow = document.getElementById('ct-consent').value;
   if (consentNow !== (window._ctConsent0 || 'unknown')) { body.consent_status = consentNow; body.consent_source = 'manual'; }
   const lidSave = !!(window._saveFromChat && window._saveFromChat.endsWith('@lid'));
-  if (!body.phone && !(lidSave && body.name)) { notify(lidSave ? 'Indicá el número real o al menos un nombre' : 'El teléfono es obligatorio', 'error'); return; }
+  const linkId = document.getElementById('ct-link')?.value;
+  if (window._saveFromChat && linkId) body.contact_id = parseInt(linkId, 10);
+  if (!body.phone && !body.contact_id && !(lidSave && body.name)) { notify(lidSave ? 'Indicá el número real o al menos un nombre' : 'El teléfono es obligatorio', 'error'); return; }
 
   if (window._saveFromChat) {
     const res = await apiFetch('/contacts/from-conversation', {
@@ -1492,7 +1501,7 @@ function applyQR(id) {
   // Nombre: preferir nombre agendado real > push_name de WA > nada (no usar teléfono)
   const phone = conv?.jid?.split('@')[0] || '';
   const savedName = conv?.contact_saved_name && conv.contact_saved_name !== phone ? conv.contact_saved_name : null;
-  const nombre = savedName || conv?.wa_push_name || conv?.contact_name !== phone ? conv?.contact_name : '';
+  const nombre = conv?.custom_name?.trim() || savedName || conv?.wa_push_name || (conv?.contact_name !== phone ? conv?.contact_name : '') || '';
   let text = q.content
     .replace(/\{\{nombre\}\}/gi, nombre || '')
     .replace(/\{\{empresa\}\}/gi, conv?.company || '')
@@ -1901,6 +1910,8 @@ function openContactModal(id) {
   document.getElementById('ct-company').value = c?.company || '';
   document.getElementById('ct-extra').value = c?.extra || '';
   document.getElementById('ct-notes').value = c?.notes || '';
+  document.getElementById('ct-link-field').style.display = 'none';
+  window._saveFromChat = null;
   window._ctConsent0 = c?.consent_status || 'unknown';
   document.getElementById('ct-consent').value = window._ctConsent0;
   document.getElementById('ct-consent-info').textContent = c?.consent_at

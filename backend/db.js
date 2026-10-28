@@ -557,6 +557,7 @@ async function runMigrations() {
     `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS consent_at BIGINT`,
     `ALTER TABLE contacts ADD COLUMN IF NOT EXISTS consent_evidence TEXT`,
     `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS ai_disclosed INTEGER DEFAULT 0`,
+    `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS custom_name TEXT`,
     // ── v3: base de conocimiento ────────────────────────────────
     `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS category TEXT DEFAULT 'general'`,
     `ALTER TABLE ai_documents ADD COLUMN IF NOT EXISTS source_url TEXT`,
