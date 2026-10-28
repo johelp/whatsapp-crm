@@ -174,6 +174,7 @@ router.post('/contacts', requireAuth, async (req, res) => {
     ).catch(() => {});
   }
   if (consent_status) await require('../privacy').setConsent(clean, consent_status, consent_source || 'manual', { userId: req.session.user.id, evidence: `registrado por el operador ${req.session.user.display_name}` });
+  require('../identity').linkPhone(clean).catch(() => {});   // enlaza los chats privados (@lid) ya identificados con este número
   res.json(c);
 });
 
@@ -197,16 +198,29 @@ router.put('/contacts/:id', requireAuth, async (req, res) => {
 
 // Guardar contacto desde conversación (upsert por JID/phone)
 router.post('/contacts/from-conversation', requireAuth, async (req, res) => {
-  const { jid, name, company, extra, notes } = req.body;
+  const { jid, name, company, extra, notes, phone: phoneIn } = req.body;
   if (!jid) return res.status(400).json({ error: 'jid requerido' });
-  
-  // Para @lid el "phone" del JID no es real — usar el phone del contacto si ya existe
+  const identity = require('../identity');
   const isLid = jid.endsWith('@lid');
-  const rawPhone = jid.split('@')[0];
-  const phone = isLid ? rawPhone : normalizePhone(rawPhone);
+
+  // Chat privado (@lid): WhatsApp no comparte el número. Los dígitos del JID NO son un teléfono.
+  //  - con el número real → se crea/usa ese contacto, se enlaza el chat y se recuerda la equivalencia
+  //  - sin número → solo se le pone nombre al chat (no se crea un contacto con un teléfono falso)
+  let phone;
+  if (isLid) {
+    const real = String(phoneIn || '').replace(/\D/g, '');
+    if (real.length < 7) {
+      if (!name) return res.status(400).json({ error: 'Para un chat privado indicá el número real o al menos un nombre' });
+      await query('UPDATE conversations SET wa_push_name = ? WHERE jid = ?', [name, jid]);
+      await identity.rememberName(jid, name, 'contact').catch(() => {});
+      return res.json({ ok: true, linked: false, message: 'Nombre guardado en el chat. Agregá el número real para enlazarlo con un contacto.' });
+    }
+    phone = normalizePhone(real);
+  } else {
+    phone = normalizePhone(jid.split('@')[0]);
+  }
 
   try {
-    // Upsert PostgreSQL
     await query(
       `INSERT INTO contacts (phone, name, company, extra, notes)
        VALUES (?, ?, ?, ?, ?)
@@ -219,26 +233,24 @@ router.post('/contacts/from-conversation', requireAuth, async (req, res) => {
       [phone, name || '', company || '', extra || '', notes || '']
     );
   } catch(e) {
-    // Fallback SQLite
     await query('INSERT OR IGNORE INTO contacts (phone, name, company, extra, notes) VALUES (?, ?, ?, ?, ?)',
       [phone, name || '', company || '', extra || '', notes || '']);
     await query('UPDATE contacts SET name=?, company=?, extra=?, notes=?, updated_at=datetime(\'now\') WHERE phone=?',
       [name || '', company || '', extra || '', notes || '', phone]);
   }
-  
+
   const c = await queryOne('SELECT * FROM contacts WHERE phone = ?', [phone]);
   if (c) {
-    // Vincular conversación + actualizar wa_push_name para que aparezca en la lista
-    await query(
-      `UPDATE conversations SET contact_id = ?, wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?`,
-      [c.id, name || null, jid]
-    );
+    await query(`UPDATE conversations SET contact_id = ?, wa_push_name = COALESCE(wa_push_name, ?) WHERE jid = ?`, [c.id, name || null, jid]);
+    if (isLid) await identity.setManualMapping(jid, phone).catch(() => {});
+    await identity.linkPhone(phone).catch(() => {});
   }
-  res.json({ ...(c || {}), ok: true });
+  res.json({ ...(c || {}), ok: true, linked: !!c });
 });
 
 router.delete('/contacts/:id', requireAuth, requireAdmin, async (req, res) => {
   await query('DELETE FROM contacts WHERE id = ?', [req.params.id]);
+  { const cc = await queryOne('SELECT phone FROM contacts WHERE id = ?', [req.params.id]); if (cc) require('../identity').linkPhone(cc.phone).catch(() => {}); }
   res.json({ ok: true });
 });
 
@@ -273,6 +285,7 @@ router.post('/contacts/import', requireAuth, upload.single('file'), async (req, 
   }
   fs.unlinkSync(req.file.path);
   // Solo si el operador declara que tiene el consentimiento de estas personas (art. 21 LSSI / ePrivacy)
+  for (const ph of importedPhones) await require('../identity').linkPhone(ph).catch(() => {});
   const attested = /^(1|true|on)$/i.test(String(req.body.consent_attest || '')) ? await require('../privacy').attestConsent(importedPhones, 'import_csv_declared', req.session.user.id) : 0;
   res.json({ imported, skipped, consent_declared: attested });
 });
@@ -1186,6 +1199,14 @@ router.delete('/ai-documents/:id', requireAuth, requireAdmin, async (req, res) =
 // ─── Sistema / Administración ─────────────────────────────────────────────────
 
 // Estadísticas del sistema (para el panel admin)
+// Nombres y chats privados (@lid): diagnóstico y reparación (no destructivo)
+router.get('/system/identity', requireAuth, requireAdmin, async (req, res) => res.json({ ok: true, ...(await require('../identity').diagnose()) }));
+router.post('/system/identity/relink', requireAuth, requireAdmin, async (req, res) => {
+  const idt = require('../identity');
+  const out = await idt.relinkAll();
+  res.json({ ok: true, resultado: out, diagnostico: await idt.diagnose() });
+});
+
 router.get('/system/stats', requireAuth, requireAdmin, async (req, res) => {
   try {
     const [convs, msgs, contacts, users] = await Promise.all([

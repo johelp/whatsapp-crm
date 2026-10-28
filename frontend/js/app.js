@@ -1048,8 +1048,9 @@ async function saveContactFromChat() {
   const phone = S.activeJid.split('@')[0];
   const name = conv?.wa_push_name || conv?.contact_name || '';
 
-  // Si ya tiene nombre real (no es solo el número), confirmar
-  if (name && name !== phone) {
+  const isLidChat = S.activeJid.endsWith('@lid');
+  // Si ya tiene nombre real (no es solo el número), confirmar (los chats privados siempre piden el número real)
+  if (name && name !== phone && !isLidChat) {
     if (!confirm(`¿Guardar "${name}" como contacto?`)) return;
     const res = await apiFetch('/contacts/from-conversation', {
       method: 'POST',
@@ -1066,7 +1067,9 @@ async function saveContactFromChat() {
     // Abrir modal para completar datos
     document.getElementById('contact-modal-title').textContent = 'Guardar contacto';
     document.getElementById('ct-id').value = '';
-    document.getElementById('ct-phone').value = phone;
+    // Chat privado (@lid): los dígitos del identificador NO son un teléfono; se pide el número real
+    document.getElementById('ct-phone').value = isLidChat ? '' : phone;
+    document.getElementById('ct-phone').placeholder = isLidChat ? 'Número real (opcional): 34600111222' : '5491123456789';
     document.getElementById('ct-name').value = name !== phone ? name : '';
     document.getElementById('ct-company').value = '';
     document.getElementById('ct-extra').value = '';
@@ -1088,7 +1091,8 @@ async function saveContact() {
   };
   const consentNow = document.getElementById('ct-consent').value;
   if (consentNow !== (window._ctConsent0 || 'unknown')) { body.consent_status = consentNow; body.consent_source = 'manual'; }
-  if (!body.phone) { notify('El teléfono es obligatorio', 'error'); return; }
+  const lidSave = !!(window._saveFromChat && window._saveFromChat.endsWith('@lid'));
+  if (!body.phone && !(lidSave && body.name)) { notify(lidSave ? 'Indicá el número real o al menos un nombre' : 'El teléfono es obligatorio', 'error'); return; }
 
   if (window._saveFromChat) {
     const res = await apiFetch('/contacts/from-conversation', {
@@ -1100,7 +1104,7 @@ async function saveContact() {
     await loadContacts();
     await loadConversations();
     if (S.activeJid) openChat(S.activeJid);
-    notify('✅ Contacto guardado');
+    notify(res?.linked === false ? (res.message || 'Nombre guardado en el chat') : '✅ Contacto guardado');
   } else if (id) {
     await apiFetch(`/contacts/${id}`, { method: 'PUT', body: JSON.stringify(body) });
     closeModal('modal-contact');
@@ -2054,6 +2058,13 @@ async function renderSettings() {
 
       <hr style="border:none;border-top:1px solid var(--border);margin-bottom:20px">
 
+      <h4 style="margin-bottom:4px">👤 Nombres y chats privados</h4>
+      <p style="font-size:12px;color:var(--text3);margin-bottom:10px">WhatsApp identifica a muchos chats con un código privado (sin número). El sistema aprende a quién corresponde cada uno con los datos que WhatsApp comparte y con los contactos que agendás. Si siguen apareciendo como «Contacto privado», podés enlazarlos a mano desde el chat (botón 👤).</p>
+      <div id="identity-box" style="font-size:12px;color:var(--text3);margin-bottom:10px">Cargando…</div>
+      <button class="btn-secondary" onclick="relinkIdentities()">Vincular chats con contactos ahora</button>
+
+      <hr style="border:none;border-top:1px solid var(--border);margin:20px 0">
+
       <h4 style="margin-bottom:4px">💾 Respaldos de la base</h4>
       <p style="font-size:12px;color:var(--text3);margin-bottom:10px">Se crea uno automático cada día (se conservan los últimos 7). Quedan guardados en el servidor: <b>descargá copias y guardalas fuera de Railway</b>, porque si se pierde el volumen se pierden también. No incluyen la API key de la IA.</p>
       <div style="margin-bottom:10px"><button class="btn-secondary" id="btn-backup-now" onclick="createBackupNow()">Crear respaldo ahora</button></div>
@@ -2140,6 +2151,7 @@ async function renderSettings() {
     loadAntibanCard();
     loadBackups();
     loadPrivacy();
+    loadIdentity();
   }
   showSettingsTab(S.settingsTab);
 }
@@ -2292,6 +2304,26 @@ async function loadAntibanCard() {
 async function resumeAntiban() {
   const r = await apiFetch('/integrations/antiban/resume', { method: 'POST' });
   if (r?.ok) { notify('Envíos reanudados'); loadAntibanCard(); } else notify('No se pudo reanudar', 'error');
+}
+
+async function loadIdentity() {
+  const box = document.getElementById('identity-box');
+  if (!box) return;
+  const d = await apiFetch('/system/identity');
+  if (!d?.ok) { box.textContent = 'No se pudo cargar.'; return; }
+  const n = (v) => Number(v || 0).toLocaleString('es-AR');
+  box.innerHTML = `Chats privados: <b style="color:var(--text)">${n(d.privadas_lid)}</b> · sin nombre ni contacto: <b style="color:${d.privadas_sin_nombre ? 'var(--amber)' : 'var(--text)'}">${n(d.privadas_sin_nombre)}</b> · con contacto: <b style="color:var(--text)">${n(d.privadas_con_contacto)}</b><br>
+    Equivalencias aprendidas: <b style="color:var(--text)">${n(d.equivalencias_aprendidas)}</b> · nombres de tu agenda: <b style="color:var(--text)">${n(d.nombres_de_agenda)}</b> · nombres de perfil: <b style="color:var(--text)">${n(d.nombres_de_perfil)}</b> · contactos en el CRM: <b style="color:var(--text)">${n(d.contactos_en_crm)}</b>
+    ${d.privadas_lid && !d.equivalencias_aprendidas && !d.nombres_de_agenda ? '<br><span style="color:var(--amber)">WhatsApp todavía no compartió equivalencias ni nombres de agenda. Se reciben al vincular el teléfono: si recién lo vinculaste, esperá unos minutos; si sigue en cero, cerrá la sesión de WhatsApp y volvé a vincular para repetir la sincronización.</span>' : ''}`;
+}
+
+async function relinkIdentities() {
+  const r = await apiFetch('/system/identity/relink', { method: 'POST' });
+  if (r?.ok) {
+    const x = r.resultado;
+    notify(`Listo: ${x.mapeos_aplicados} enlazados por equivalencia, ${x.vinculados_por_nombre} por nombre, ${x.nombres_aplicados} nombres; ${x.siguen_sin_nombre} siguen sin nombre`);
+    loadIdentity(); loadConversations();
+  } else notify(r?.error || 'No se pudo ejecutar', 'error');
 }
 
 async function loadBackups() {

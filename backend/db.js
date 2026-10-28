@@ -356,6 +356,18 @@ async function createTables() {
       counts TEXT,
       created_at BIGINT
     )`,
+    `CREATE TABLE IF NOT EXISTS lid_map (
+      lid TEXT PRIMARY KEY,
+      phone TEXT NOT NULL,
+      source TEXT,
+      updated_at BIGINT
+    )`,
+    `CREATE TABLE IF NOT EXISTS wa_names (
+      jid TEXT PRIMARY KEY,
+      name TEXT,
+      source TEXT,
+      updated_at BIGINT
+    )`,
     // ── Anti-ban e integraciones (tiempos como epoch ms BIGINT: portables SQLite/PG) ──
     `CREATE TABLE IF NOT EXISTS settings (
       key TEXT PRIMARY KEY,

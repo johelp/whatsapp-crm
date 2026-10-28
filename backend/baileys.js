@@ -9,6 +9,7 @@ const qrcode = require('qrcode');
 const { query, queryOne } = require('./db');
 const { runAIAgent } = require('./ai-agent');
 const antiban = require('./antiban');
+const identity = require('./identity');
 const aiFeatures = require('./ai-features');
 const { emitEvent } = require('./bus');
 
@@ -352,6 +353,27 @@ async function processGroupMessage(msg) {
   if (io) io.emit('message:new', { jid: groupJid, is_group: true, group_name: groupName, sender_jid: senderJid, sender_name: pushName, content, type, timestamp, message_id: msg.key.id });
 }
 
+// ─── Aprendizaje de identidades (LID ↔ teléfono ↔ nombre) ─────────────────────
+// WhatsApp usa cada vez más identificadores @lid sin número. Estas equivalencias y los nombres de la agenda del teléfono
+// llegan en el historial y en contacts.upsert / contacts.update / chats.upsert / chats.phoneNumberShare.
+async function learnContact(c, apply = true) {
+  if (!c?.id) return;
+  const lid = c.lid || (c.id.endsWith('@lid') ? c.id : null);
+  const pn  = c.jid || (!c.id.endsWith('@lid') && !c.id.endsWith('@g.us') ? c.id : null);
+  if (lid && pn) await identity.rememberMapping(lid, pn, 'wa', apply);
+  for (const j of [lid, pn].filter(Boolean)) {
+    if (c.name) await identity.rememberName(j, c.name, 'contact', apply);     // nombre en la agenda del teléfono
+    if (c.notify) await identity.rememberName(j, c.notify, 'push', apply);    // nombre que la persona se puso
+  }
+}
+async function learnChat(ch, apply = true) {
+  if (!ch?.id || ch.id.endsWith('@g.us')) return;
+  const lid = ch.lidJid || (ch.id.endsWith('@lid') ? ch.id : null);
+  const pn  = ch.pnJid || (ch.id.endsWith('@s.whatsapp.net') ? ch.id : null);
+  if (lid && pn) await identity.rememberMapping(lid, pn, 'wa', apply);
+  if (ch.name) for (const j of [lid, pn].filter(Boolean)) await identity.rememberName(j, ch.name, 'push', apply);
+}
+
 // Transcribe audios entrantes si la función está activa. Nunca bloquea el flujo: ante error devuelve el texto original.
 async function maybeTranscribe(msg, fallback) {
   try {
@@ -411,7 +433,12 @@ async function processMessage(msg) {
     }
   }
 
-  const displayName = msg.pushName || contact?.name || phone;
+  // En chats @lid el "phone" son los dígitos del identificador privado: nunca se usan como nombre
+  const displayName = msg.pushName || contact?.name || (isLid ? null : phone);
+  // Versiones nuevas de WhatsApp/Baileys traen el número real en la clave del mensaje
+  const altPn = msg.key?.remoteJidAlt || msg.key?.senderPn || null;
+  if (isLid && altPn) await identity.rememberMapping(jid, altPn, 'wa').catch(() => {});
+  if (isLid && msg.pushName) await identity.rememberName(jid, msg.pushName, 'push', false).catch(() => {});
 
   if (contact?.id) {
     await query('UPDATE conversations SET contact_id = ? WHERE jid = ? AND contact_id IS NULL', [contact.id, jid]).catch(() => {});
@@ -419,6 +446,7 @@ async function processMessage(msg) {
 
   await saveMessage({ message_id: msg.key.id, jid, direction: 'in', type, content, timestamp, is_auto_reply: 0, sent_by: null, media_data: mediaData });
   await upsertConversation(jid, contact?.id, content, new Date(timestamp).toISOString(), displayName);
+  await identity.applyIdentity(jid).catch(() => {});   // nombre de la agenda / contacto enlazado, si ya se conocen
 
   // Opt-out: "STOP" / "BAJA" → lista de bloqueo (protege la reputación del número)
   const optedOut = OPT_OUT_RE.test(text || '');
@@ -447,7 +475,7 @@ async function processMessage(msg) {
       `SELECT cv.*, c.name as contact_name, c.phone as contact_phone
        FROM conversations cv LEFT JOIN contacts c ON cv.contact_id = c.id WHERE cv.jid = ?`, [jid]
     );
-    io.emit('message:new', { jid, phone, contact_name: displayName, content, type, timestamp, is_auto_reply: autoHandled, message_id: msg.key.id, conversation: convFull });
+    io.emit('message:new', { jid, phone, contact_name: displayName || 'Contacto privado', content, type, timestamp, is_auto_reply: autoHandled, message_id: msg.key.id, conversation: convFull });
   }
 }
 
@@ -614,7 +642,7 @@ async function connect() {
   sock.ev.on('creds.update', () => { authRegistered = !!state.creds?.registered; saveCreds(); });
 
   // ─── HISTORIAL ────────────────────────────────────────────────────────────────
-  sock.ev.on('messaging-history.set', async ({ messages: msgs, contacts: histContacts, isLatest }) => {
+  sock.ev.on('messaging-history.set', async ({ messages: msgs, contacts: histContacts, chats: histChats, isLatest }) => {
     console.log(`[Historial] Recibidos: ${msgs.length} mensajes, ${histContacts?.length || 0} contactos (isLatest: ${isLatest})`);
     if (io) io.emit('history:progress', { total: msgs.length, imported: 0, status: 'starting' });
 
@@ -674,6 +702,14 @@ async function connect() {
       }
       console.log(`[Historial] Contactos procesados: ${histContacts.length}`);
     }
+
+    // Aprender equivalencias LID↔número y nombres de la agenda (carga masiva; se aplica una sola vez al final)
+    try {
+      for (const c of histContacts || []) await learnContact(c, false).catch(() => {});
+      for (const ch of histChats || []) await learnChat(ch, false).catch(() => {});
+      const applied = await identity.applyAll();
+      console.log(`[Identidades] aprendidas del historial: ${histContacts?.length || 0} contactos, ${histChats?.length || 0} chats → ${applied} conversaciones revisadas`);
+    } catch (e) { console.error('[Identidades] error:', e.message); }
 
     let imported = 0;
     let errors = 0;
@@ -764,6 +800,7 @@ async function connect() {
   sock.ev.on('chats.phoneNumberShare', async ({ lid, jid }) => {
     if (!lid || !jid) return;
     console.log('[LID→Phone] vínculo de identificador actualizado');
+    await identity.rememberMapping(lid, jid, 'wa').catch(() => {});
     const phone = extractPhone(jid);
     try {
       // Buscar si hay conversación con este LID
@@ -792,9 +829,13 @@ async function connect() {
   });
 
   // Cuando se actualizan contactos (incluye nombre + mapeo lid/jid)
+  sock.ev.on('contacts.upsert', async (contacts) => { for (const c of contacts || []) await learnContact(c).catch(() => {}); });
+  sock.ev.on('chats.upsert', async (chats) => { for (const ch of chats || []) await learnChat(ch).catch(() => {}); });
+
   sock.ev.on('contacts.update', async (updates) => {
     for (const c of updates) {
       if (!c.id) continue;
+      await learnContact(c).catch(() => {});
       const name = c.notify || c.name || null;
       if (!name) continue;
       const jid = c.id;
@@ -1028,4 +1069,4 @@ async function fullResetAuth() {
   return true;
 }
 
-module.exports = { reconnectDelay, limitHistory, connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };
+module.exports = { learnContact, learnChat, reconnectDelay, limitHistory, connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };

@@ -62,6 +62,7 @@ const step = async (name, fn) => { try { await fn(); } catch (e) { log(false, na
     const e = await http('POST', '/api/privacy/erase', { body: { q: '+0000000000000', confirm: 'otro' } }); log(e.status === 400, 'borrado exige confirmación del teléfono', `HTTP ${e.status}`);
     const rt = await http('GET', '/api/privacy/retention/preview'); log(rt.status === 200 && rt.json?.ok, 'vista previa de retención');
   });
+  await step('identidades', async () => { const r = await http('GET', '/api/system/identity'); log(r.status === 200 && r.json?.ok, 'diagnóstico de nombres y chats privados', `privados=${r.json?.privadas_lid} sin nombre=${r.json?.privadas_sin_nombre} equivalencias=${r.json?.equivalencias_aprendidas}`); });
   await step('anti-ban', async () => { const r = await http('GET', '/api/integrations/antiban'); log(r.status === 200 && r.json?.timezone, 'estado anti-bloqueo', `zona=${r.json?.timezone} pausado=${r.json?.paused}`); });
 
   await step('api key', async () => {
