@@ -272,16 +272,16 @@ async function upsertConversationHistory(jid, contactId, lastMessage, lastMessag
     await query(
       `UPDATE conversations SET
         contact_id = COALESCE(contact_id, ?),
-        wa_push_name = CASE WHEN ? IS NOT NULL AND ? != '' THEN ? ELSE wa_push_name END,
+        wa_push_name = CASE WHEN CAST(? AS TEXT) != '' THEN CAST(? AS TEXT) ELSE wa_push_name END,
         last_message = CASE WHEN last_message_at < ? THEN ? ELSE last_message END,
         last_message_at = CASE WHEN last_message_at < ? THEN ? ELSE last_message_at END
        WHERE jid = ?`,
-      [contactId || null, pushName, pushName, pushName, lastMessageAt, lastMessage, lastMessageAt, lastMessageAt, jid]
+      [contactId || null, pushName || '', pushName || '', lastMessageAt, lastMessage, lastMessageAt, lastMessageAt, jid]
     );
   } else {
     await query(
-      `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count) VALUES (?, ?, ?, ?, ?, 0)`,
-      [jid, contactId || null, pushName, lastMessage, lastMessageAt]
+      `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count) VALUES (?, ?, NULLIF(CAST(? AS TEXT), ''), ?, ?, 0)`,
+      [jid, contactId || null, pushName || '', lastMessage, lastMessageAt]
     );
   }
 }
@@ -292,19 +292,20 @@ async function upsertConversation(jid, contactId, lastMessage, lastMessageAt, pu
     await query(
       `UPDATE conversations SET
         contact_id = COALESCE(?, contact_id),
-        wa_push_name = CASE WHEN ? IS NOT NULL AND ? != '' THEN ? ELSE wa_push_name END,
+        wa_push_name = CASE WHEN CAST(? AS TEXT) != '' THEN CAST(? AS TEXT) ELSE wa_push_name END,
         last_message = ?,
         last_message_at = ?,
         unread_count = unread_count + 1,
         updated_at = NOW()
        WHERE jid = ?`,
-      [contactId || null, pushName, pushName, pushName, lastMessage, lastMessageAt, jid]
+      // '' en vez de null: PostgreSQL no puede inferir el tipo de un parámetro nulo dentro de CASE/IS NOT NULL
+      [contactId || null, pushName || '', pushName || '', lastMessage, lastMessageAt, jid]
     );
   } else {
     await query(
       `INSERT INTO conversations (jid, contact_id, wa_push_name, last_message, last_message_at, unread_count)
-       VALUES (?, ?, ?, ?, ?, 1)`,
-      [jid, contactId || null, pushName, lastMessage, lastMessageAt]
+       VALUES (?, ?, NULLIF(CAST(? AS TEXT), ''), ?, ?, 1)`,
+      [jid, contactId || null, pushName || '', lastMessage, lastMessageAt]
     );
   }
 }
@@ -905,15 +906,22 @@ async function connect() {
 // ─── Send message ─────────────────────────────────────────────────────────────
 
 // ¿Existe el número en WhatsApp? (solo se consulta para contactos nuevos y se cachea 24 h)
-async function numberExists(jid) {
-  const c = _existsCache.get(jid);
-  if (c && Date.now() - c.at < 24 * 3600 * 1000) return c.exists;
+/**
+ * Resuelve el JID REAL de un número en WhatsApp probando las variantes (p. ej. Argentina con y sin el 9:
+ * 549… vs 54…). Antes se consultaba solo una forma y un número válido salía como "no tiene WhatsApp".
+ * Devuelve { exists: true|false|null, jid } — null = no se pudo consultar (no se bloquea el envío).
+ */
+async function resolveRealJid(convJid, onWhatsApp = (...a) => sock.onWhatsApp(...a)) {
+  const c = _existsCache.get(convJid);
+  if (c && Date.now() - c.at < 24 * 3600 * 1000) return c;
+  const variants = antiban.phoneVariants(convJid.split('@')[0]).map(v => `${v}@s.whatsapp.net`);
   try {
-    const [r] = await sock.onWhatsApp(jid);
-    const exists = !!r?.exists;
-    _existsCache.set(jid, { exists, at: Date.now() });
-    return exists;
-  } catch (e) { return null; }   // si la consulta falla, no bloquear el envío
+    const res = await onWhatsApp(...variants);
+    const hit = (res || []).find(r => r?.exists);
+    const out = { exists: !!hit, jid: hit?.jid || convJid, at: Date.now() };
+    _existsCache.set(convJid, out);
+    return out;
+  } catch (e) { return { exists: null, jid: convJid, at: Date.now() }; }
 }
 
 async function sendMessage(phone, text, sentBy = null, opts = {}) {
@@ -925,21 +933,25 @@ async function sendMessage(phone, text, sentBy = null, opts = {}) {
   } else {
     convJid = `${normalizePhone(phone)}@s.whatsapp.net`;
   }
+  const gateJid = convJid;
 
-  const sent = await antiban.gate({ jid: convJid, text, kind: opts.kind || 'manual' }, async ({ cold }) => {
+  const sent = await antiban.gate({ jid: gateJid, text, kind: opts.kind || 'manual' }, async ({ cold }) => {
+    let sendJid = convJid;
     if (cold && convJid.endsWith('@s.whatsapp.net')) {
-      const exists = await numberExists(convJid);
-      antiban.reportNumberCheck(exists === false);
-      if (exists === false) throw new antiban.GateError('NOT_ON_WHATSAPP', 'El número no tiene WhatsApp');
+      const r = await resolveRealJid(convJid);
+      antiban.reportNumberCheck(r.exists === false);
+      if (r.exists === false) throw new antiban.GateError('NOT_ON_WHATSAPP', 'El número no tiene WhatsApp');
+      // Se envía al JID real y la conversación se guarda con ese mismo JID: así la respuesta cae en el mismo chat
+      if (r.exists && r.jid && r.jid !== convJid) { sendJid = r.jid; convJid = r.jid; }
     }
     // Typing indicator solo para @s.whatsapp.net (no @lid — causa "Esperando")
-    if (convJid.endsWith('@s.whatsapp.net')) {
-      await sock.sendPresenceUpdate('composing', convJid).catch(() => {});
+    if (sendJid.endsWith('@s.whatsapp.net')) {
+      await sock.sendPresenceUpdate('composing', sendJid).catch(() => {});
       const typingMs = Math.min(Math.max(text.length * 25, 600), 2500) * (0.8 + Math.random() * 0.5);
       await new Promise(r => setTimeout(r, typingMs));
-      await sock.sendPresenceUpdate('paused', convJid).catch(() => {});
+      await sock.sendPresenceUpdate('paused', sendJid).catch(() => {});
     }
-    return sock.sendMessage(convJid, { text });
+    return sock.sendMessage(sendJid, { text });
   });
 
   // Los mensajes generados por la IA quedan marcados (trazabilidad, Reglamento de IA)
@@ -1069,4 +1081,4 @@ async function fullResetAuth() {
   return true;
 }
 
-module.exports = { learnContact, learnChat, reconnectDelay, limitHistory, connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };
+module.exports = { resolveRealJid, learnContact, learnChat, reconnectDelay, limitHistory, connect, setIO, getStatus, getSock, sendMessage, sendGroupMessage, sendFile, logout, normalizePhone, normalizeJid, extractPhone, requestHistoryResync, fullResetAuth };
